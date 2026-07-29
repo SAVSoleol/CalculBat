@@ -256,10 +256,11 @@ st.sidebar.markdown("**Tarifs énergie**")
 tariff_profiles = GRD_PROFILES
 
 
+tariff_profile_names = list(tariff_profiles)
 tariff_profile = st.sidebar.selectbox(
     "Profil tarifaire GRD",
-    list(tariff_profiles),
-    index=0,
+    tariff_profile_names,
+    index=tariff_profile_names.index("Groupe E") if "Groupe E" in tariff_profile_names else 0,
     key="tariff_profile",
 )
 profile = tariff_profiles[tariff_profile]
@@ -364,7 +365,7 @@ study_mode_label = st.sidebar.radio(
     [
         "Autoconsommation résidentielle (5-50 kWh)",
         "PME (50-150 kWh)",
-        "C&I / Industrie (150-500 kWh)",
+        "C&I / Industrie (150-750 kWh)",
     ],
     index=0,
     key="study_mode_label",
@@ -384,8 +385,8 @@ elif study_mode_label.startswith("PME"):
     mode_rec_label = "Compromis économie, usage et autoconsommation"
 else:
     study_mode = "ci"
-    mode_cap_min, mode_cap_max, mode_cap_step = 150, 500, 5
-    mode_p_min, mode_p_max, mode_p_step = 20, 200, 5
+    mode_cap_min, mode_cap_max, mode_cap_step = 150, 750, 10
+    mode_p_min, mode_p_max, mode_p_step = 20, 250, 10
     cycles_low = 200.0  # seuil technique interne, non réglable
     mode_rec_label = "Saturation économique C&I"
 
