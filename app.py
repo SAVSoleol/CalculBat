@@ -364,7 +364,7 @@ elif study_mode_label.startswith("PME"):
 else:
     study_mode = "ci"
     mode_cap_min, mode_cap_max, mode_cap_step = 150, 750, 5
-    mode_p_min, mode_p_max, mode_p_step = 20, 200, 5
+    mode_p_min, mode_p_max, mode_p_step = 20, 250, 5
     cycles_low = 200.0  # seuil technique interne, non réglable
     mode_rec_label = "Saturation économique C&I"
 
