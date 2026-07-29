@@ -276,22 +276,39 @@ manual_tariffs = st.sidebar.checkbox(
     key=f"manual_tariffs_{tariff_profile}",
 )
 
-tariff_import_ht = st.sidebar.number_input(
-    "Tarif achat haut tarif (CHF/kWh)",
-    value=float(profile["ht"]),
-    step=0.01,
-    format="%.2f",
-    key=f"tariff_import_ht_{tariff_profile}",
-    disabled=not manual_tariffs,
-)
-tariff_import_bt = st.sidebar.number_input(
-    "Tarif achat bas tarif (CHF/kWh)",
-    value=float(profile["bt"]),
-    step=0.01,
-    format="%.2f",
-    key=f"tariff_import_bt_{tariff_profile}",
-    disabled=not manual_tariffs,
-)
+single_tariff = bool(profile.get("single_tariff", False))
+
+if single_tariff:
+    tariff_import_unique = st.sidebar.number_input(
+        "Tarif achat unique (CHF/kWh)",
+        value=float(profile["ht"]),
+        step=0.01,
+        format="%.2f",
+        key=f"tariff_import_unique_{tariff_profile}",
+        disabled=not manual_tariffs,
+        help="Tarif d'achat identique toute l'année, 24h/24.",
+    )
+    tariff_import_ht = float(tariff_import_unique)
+    tariff_import_bt = float(tariff_import_unique)
+else:
+    tariff_import_ht = st.sidebar.number_input(
+        "Tarif achat haut tarif (CHF/kWh)",
+        value=float(profile["ht"]),
+        step=0.01,
+        format="%.2f",
+        key=f"tariff_import_ht_{tariff_profile}",
+        disabled=not manual_tariffs,
+    )
+
+    tariff_import_bt = st.sidebar.number_input(
+        "Tarif achat bas tarif (CHF/kWh)",
+        value=float(profile["bt"]),
+        step=0.01,
+        format="%.2f",
+        key=f"tariff_import_bt_{tariff_profile}",
+        disabled=not manual_tariffs,
+    )
+
 tariff_export = st.sidebar.number_input(
     "Tarif rachat / revente (CHF/kWh)",
     value=float(profile["export"]),
@@ -301,7 +318,13 @@ tariff_export = st.sidebar.number_input(
     disabled=not manual_tariffs,
 )
 
-if tariff_profile == "Personnalise":
+if single_tariff:
+    high_tariff_periods = ()
+    weekend_low_tariff = False
+    with st.sidebar.expander("Tarif unique 24h/24", expanded=False):
+        st.caption(profile["description"])
+        st.caption(f"Source / note : {profile.get('source', 'à vérifier')}")
+elif tariff_profile == "Personnalise":
     with st.sidebar.expander("Plages haut tarif personnalisées", expanded=True):
         ht1_start = st.number_input("HT 1 début", 0.0, 24.0, 7.0, step=0.5, format="%.1f", key="custom_ht1_start")
         ht1_end = st.number_input("HT 1 fin", 0.0, 24.0, 12.0, step=0.5, format="%.1f", key="custom_ht1_end")
@@ -327,8 +350,6 @@ else:
 
 tariff_import = tariff_import_ht  # compatibilité avec les anciens textes/graphes
 
-roundtrip_eff = st.sidebar.slider(T("roundtrip"), 0.50, 1.0, 0.92, key="roundtrip")
-
 # Coûts batterie masqués : le dimensionnement principal utilise uniquement
 # les flux import/export et les tarifs HT/BT/rachat.
 # Ces valeurs restent définies pour ne pas casser les anciens graphiques/PDF.
@@ -343,7 +364,7 @@ study_mode_label = st.sidebar.radio(
     [
         "Autoconsommation résidentielle (5-50 kWh)",
         "PME (50-150 kWh)",
-        "C&I / Industrie (150-750 kWh)",
+        "C&I / Industrie (150-500 kWh)",
     ],
     index=0,
     key="study_mode_label",
@@ -363,10 +384,32 @@ elif study_mode_label.startswith("PME"):
     mode_rec_label = "Compromis économie, usage et autoconsommation"
 else:
     study_mode = "ci"
-    mode_cap_min, mode_cap_max, mode_cap_step = 150, 750, 5
-    mode_p_min, mode_p_max, mode_p_step = 20, 250, 5
+    mode_cap_min, mode_cap_max, mode_cap_step = 150, 500, 5
+    mode_p_min, mode_p_max, mode_p_step = 20, 200, 5
     cycles_low = 200.0  # seuil technique interne, non réglable
     mode_rec_label = "Saturation économique C&I"
+
+# Rendement aller-retour par défaut selon le type d'étude.
+# L'utilisateur peut ensuite ajuster librement la valeur dans la sidebar.
+roundtrip_default = {
+    "residential": 0.92,
+    "pme": 0.88,
+    "ci": 0.80,
+}[study_mode]
+
+roundtrip_eff = st.sidebar.slider(
+    T("roundtrip"),
+    min_value=0.50,
+    max_value=1.00,
+    value=roundtrip_default,
+    step=0.01,
+    key=f"roundtrip_{study_mode}",
+    help=(
+        "Rendement aller-retour du système batterie. Valeurs par défaut : "
+        "92 % en résidentiel, 88 % en PME et 80 % en C&I / Industrie. "
+        "La valeur reste modifiable selon l'architecture et la fiche technique du système."
+    ),
+)
 
 st.sidebar.markdown(T("search_range"))
 st.sidebar.caption(

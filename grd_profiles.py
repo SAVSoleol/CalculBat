@@ -17,6 +17,20 @@ from __future__ import annotations
 # weekend_low=False signifie : les mêmes plages HT s'appliquent aussi le week-end.
 
 GRD_PROFILES = {
+    "Tarif unique 24h/24": {
+        "ht": 0.21,
+        "bt": 0.21,
+        "export": 0.08,
+        "periods": (),
+        "weekend_low": False,
+        "needs_verification": False,
+        "single_tariff": True,
+        "source": "Tarif unique saisi manuellement",
+        "description": (
+            "Un seul tarif d'achat est appliqué toute l'année, "
+            "24h/24, sans distinction haut tarif / bas tarif."
+        ),
+    },
     "Groupe E": {
         "ht": 0.31,
         "bt": 0.21,
