@@ -200,9 +200,9 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         y += 14
 
     pdf.set_xy(8, 255)
-    pdf.set_font("Arial", "B", 8)
+    pdf.set_font("Arial", "B", 10)
     pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.multi_cell(36, 4, _tx("L'energie d'aujourd'hui,\noptimisee pour demain."))
+    pdf.multi_cell(36, 4, _tx("L'énergie d'aujourd'hui,\noptimisée pour demain."))
 
 
 def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
