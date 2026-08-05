@@ -19,7 +19,7 @@ from fpdf import FPDF
 
 
 SOLEOL_ORANGE = (233, 78, 53)
-DARK = (25, 35, 48)
+DARK = (0, 0, 0)
 TEXT = (35, 35, 35)
 MUTED = (100, 110, 120)
 BLUE = (37, 99, 235)
@@ -171,10 +171,14 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         pdf.set_text_color(230, 235, 240)
         pdf.cell(36, 5, "ENERGIE SOLAIRE", ln=True)
 
-    pdf.set_xy(8, 42)
-    pdf.set_font("Arial", "B", 10)
+    pdf.set_xy(8, 68)
+    pdf.set_font("Arial", "B", 8)
     pdf.set_text_color(255, 255, 255)
-    pdf.multi_cell(36, 6, _tx("ETUDE DE\nDIMENSIONNEMENT\nBATTERIE"))
+    pdf.multi_cell(
+        36,
+        4.5,
+        _tx("ETUDE DE\nDIMENSIONNEMENT\nBATTERIE"),
+    )
 
     infos = [
         ("Client", "A renseigner"),
