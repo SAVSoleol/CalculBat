@@ -403,9 +403,9 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     _info_box(pdf, x0, 137, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
 
     pdf.set_xy(x0, 184)
-    pdf.set_font("Arial", "", 9)
+    pdf.set_font("Arial", "", 10)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(145, 4, _tx("Les resultats sont bases sur les mesures reelles import/export et les tarifs renseignes. Les valeurs sont arrondies."))
+    pdf.multi_cell(145, 4, _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."))
 
 
 def _page_2(pdf, df, meta, rec, best, big, sim):
