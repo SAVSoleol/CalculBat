@@ -225,7 +225,7 @@ def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
         zorder=3,
         color="#1565C0",
     )
-    ax.set_title("Energie valorisee selon la capacité batterie", fontsize=11, weight="bold")
+    ax.set_title("Energie valorisée selon la capacité batterie", fontsize=11, weight="bold")
     ax.set_xlabel("Capacité batterie (kWh)", fontsize=9, labelpad=8)
     ax.set_ylabel("Import evite (kWh/an)", fontsize=9)
     ax.grid(alpha=0.22)
@@ -377,7 +377,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     # Main metrics
     _metric_box(pdf, x0, 30, 43, 28, "Capacité", f"{best.Cap_kWh:.0f} kWh", color=BLUE)
     _metric_box(pdf, x0 + 47, 30, 43, 28, "Puissance", f"{best.Power_kW:.0f} kW", color=BLUE)
-    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisee", f"{_kwh(import_avoided)} kWh", "Achats reseau evites", color=GREEN)
+    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisée", f"{_kwh(import_avoided)} kWh", "Achats reseau evites", color=GREEN)
 
     y = 67
     w = 34
@@ -427,7 +427,7 @@ def _page_2(pdf, df, meta, rec, best, big, sim):
     pdf.set_xy(10, 275)
     pdf.set_font("Arial", "", 7)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'energie achetee au reseau qui peut etre evitee selon la capacité batterie. Les deux courbes mensuelles separent l'effet de la batterie sur l'import et sur l'export reseau."))
+    pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'énergie achetée au reseau qui peut etre evitée selon la capacité batterie. Les deux courbes mensuelles separent l'effet de la batterie sur l'import et sur l'export reseau."))
 
 
 def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export):
@@ -495,7 +495,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         "LECTURE DES RESULTATS",
         f"La batterie permet de reduire les achats reseau de {import_reduc:.0f}% et l'injection de {export_reduc:.0f}%. "
         f"Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire, avec environ {best.Cycles_per_year:.0f} cycles equivalents par an. "
-        "La capacité retenue correspond au meilleur compromis entre l'energie valorisee, la puissance disponible et l'utilisation annuelle de la batterie.",
+        "La capacité retenue correspond au meilleur compromis entre l'énergie valorisee, la puissance disponible et l'utilisation annuelle de la batterie.",
         fill=LIGHT_BG,
         border=BLUE,
     )
