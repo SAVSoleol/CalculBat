@@ -105,7 +105,7 @@ def _metric_box(pdf: FPDF, x: float, y: float, w: float, h: float, label: str, v
     pdf.set_text_color(*MUTED)
     pdf.cell(w - 8, 4, _tx(label.upper()), ln=True)
     pdf.set_xy(x + 4, y + 11)
-    pdf.set_font("Arial", "B", 13)
+    pdf.set_font("Arial", "B", 12)
     pdf.set_text_color(*color)
     pdf.cell(w - 8, 7, _tx(value), ln=True)
     if sub:
