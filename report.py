@@ -1,22 +1,19 @@
 """PDF report generation for Battery Sizer.
 
-Creates a clean 4-page A4 report:
+Creates a clean 3-page A4 report:
 1. executive summary
 2. charts
 3. detailed analysis
-4. simulated capacities table
 """
 
 from __future__ import annotations
 
 from io import BytesIO
-from dataclasses import dataclass
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 from fpdf import FPDF
 
@@ -132,21 +129,50 @@ def _info_box(pdf: FPDF, x: float, y: float, w: float, h: float, title: str, tex
     pdf.multi_cell(w - 10, 4, _tx(text))
 
 
-def _side_bar(pdf: FPDF, meta, tariff_profile: str):
+def _resolve_logo_path(logo_path: str | None = None) -> str | None:
+    """Return the first existing Soleol logo path, if available."""
+    from pathlib import Path
+
+    candidates = []
+    if logo_path:
+        candidates.append(Path(logo_path))
+
+    candidates.extend(
+        [
+            Path("logo_soleol.png"),
+            Path("logo_soleol.jpg"),
+            Path("soleol_logo.png"),
+            Path("soleol_logo.jpg"),
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None):
     pdf.set_fill_color(*DARK)
     pdf.rect(0, 0, 52, 297, style="F")
 
-    pdf.set_xy(8, 12)
-    pdf.set_font("Arial", "B", 16)
-    pdf.set_text_color(255, 255, 255)
-    pdf.cell(36, 8, "SOLEOL SA", ln=True)
-    pdf.set_x(8)
-    pdf.set_font("Arial", "", 8)
-    pdf.set_text_color(230, 235, 240)
-    pdf.cell(36, 5, "ENERGIE SOLAIRE", ln=True)
+    resolved_logo = _resolve_logo_path(logo_path)
+    if resolved_logo:
+        # Logo sur fond sombre, conserve ses proportions dans une zone de 36 x 18 mm.
+        pdf.image(resolved_logo, x=8, y=11, w=36)
+    else:
+        # Solution de secours si aucun fichier logo n'est présent.
+        pdf.set_xy(8, 12)
+        pdf.set_font("Arial", "B", 16)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(36, 8, "SOLEOL SA", ln=True)
+        pdf.set_x(8)
+        pdf.set_font("Arial", "", 8)
+        pdf.set_text_color(230, 235, 240)
+        pdf.cell(36, 5, "ENERGIE SOLAIRE", ln=True)
 
     pdf.set_xy(8, 42)
-    pdf.set_font("Arial", "B", 13)
+    pdf.set_font("Arial", "B", 10)
     pdf.set_text_color(255, 255, 255)
     pdf.multi_cell(36, 6, _tx("ETUDE DE\nDIMENSIONNEMENT\nBATTERIE"))
 
@@ -326,26 +352,9 @@ def _plot_monthly_export(df, sim) -> BytesIO:
     buf.seek(0)
     return buf
 
-def _plot_soc(df, sim, best) -> BytesIO:
-    usable = getattr(sim, "usable_capacity_kWh", float(best.Cap_kWh))
-    soc_min = getattr(sim, "soc_min_pct", 0.0)
-    soc_pct = soc_min + (sim.soc / usable * (100.0 - soc_min)) if usable > 0 else sim.soc * 0
-    fig, ax = plt.subplots(figsize=(11, 3.2))
-    ax.plot(pd.to_datetime(df.timestamp), soc_pct, lw=0.7)
-    ax.set_ylabel("SOC (%)")
-    ax.set_title("Etat de charge de la batterie", fontsize=11, weight="bold")
-    ax.grid(alpha=0.20)
-    fig.tight_layout()
-    buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, swissolar=None):
+def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, logo_path=None):
     pdf.add_page()
-    _side_bar(pdf, meta, tariff_profile)
+    _side_bar(pdf, meta, tariff_profile, logo_path=logo_path)
 
     x0 = 58
     pdf.set_xy(x0, 14)
@@ -389,26 +398,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     )
     _info_box(pdf, x0, 137, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
 
-    note_y = 184
-    if swissolar and swissolar.get("available"):
-        prod_ref = swissolar.get("production_ref_kwh")
-        cons_ref = swissolar.get("consumption_ref_kwh")
-        overall = swissolar.get("overall_ref_kwh")
-        prod_txt = f"{prod_ref:.1f} kWh" if prod_ref is not None else "non calculable"
-        cons_txt = f"{cons_ref:.1f} kWh" if cons_ref is not None else "non calculable"
-        text = (
-            f"Repere selon la production : {prod_txt}. "
-            f"Repere selon la consommation totale : {cons_txt}. "
-            f"Valeur conservatrice retenue : {overall:.1f} kWh. "
-            "Ces regles empiriques completent la simulation sur les mesures quart-horaires."
-        )
-        _info_box(
-            pdf, x0, 177, 144, 32, "CONTROLE SWISSOLAR", text,
-            fill=LIGHT_BG, border=BLUE,
-        )
-        note_y = 216
-
-    pdf.set_xy(x0, note_y)
+    pdf.set_xy(x0, 184)
     pdf.set_font("Arial", "", 7)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(145, 4, _tx("Les resultats sont bases sur les mesures reelles import/export et les tarifs renseignes. Les valeurs sont arrondies."))
@@ -492,13 +482,32 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         border=SOLEOL_ORANGE,
     )
 
-    soc = _plot_soc(df, sim, best)
-    pdf.image(soc, x=10, y=105, w=188)
+    _info_box(
+        pdf,
+        10,
+        103,
+        188,
+        38,
+        "LECTURE DES RESULTATS",
+        f"La batterie permet de reduire les achats reseau de {import_reduc:.0f}% et l'injection de {export_reduc:.0f}%. "
+        f"Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire, avec environ {best.Cycles_per_year:.0f} cycles equivalents par an. "
+        "La capacite retenue correspond au meilleur compromis entre l'energie valorisee, la puissance disponible et l'utilisation annuelle de la batterie.",
+        fill=LIGHT_BG,
+        border=BLUE,
+    )
 
-    pdf.set_xy(10, 242)
-    pdf.set_font("Arial", "", 7)
-    pdf.set_text_color(*MUTED)
-    pdf.multi_cell(188, 4, _tx("L'etat de charge permet de verifier si la batterie est utilisee regulierement ou si une partie de la capacite reste inactive."))
+    _info_box(
+        pdf,
+        10,
+        151,
+        188,
+        34,
+        "POINTS D'ATTENTION",
+        "Les resultats dependent du profil quart-horaire mesure, des tarifs d'achat et de reprise, du rendement de la batterie et de la capacite utile retenue. "
+        "Une evolution importante de la consommation ou de la production photovoltaïque peut modifier le dimensionnement optimal.",
+        fill=LIGHT_ORANGE,
+        border=SOLEOL_ORANGE,
+    )
 
 def generate_battery_report(
     *,
@@ -518,11 +527,12 @@ def generate_battery_report(
     cost_life: float = 13,
     sections=None,
     swissolar=None,
+    logo_path: str | None = None,
 ) -> bytes:
     pdf = ReportPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
 
-    _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, swissolar=swissolar)
+    _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, logo_path=logo_path)
     _page_2(pdf, df, meta, rec, best, big, sim)
     _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export)
 
