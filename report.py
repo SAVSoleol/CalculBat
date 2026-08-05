@@ -227,7 +227,7 @@ def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
     )
     ax.set_title("Energie valorisée selon la capacité batterie", fontsize=11, weight="bold")
     ax.set_xlabel("Capacité batterie (kWh)", fontsize=9, labelpad=8)
-    ax.set_ylabel("Import evite (kWh/an)", fontsize=9)
+    ax.set_ylabel("Import evité (kWh/an)", fontsize=9)
     ax.grid(alpha=0.22)
     ax.tick_params(axis="both", labelsize=8)
     ax.annotate(
@@ -377,7 +377,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     # Main metrics
     _metric_box(pdf, x0, 30, 43, 28, "Capacité", f"{best.Cap_kWh:.0f} kWh", color=BLUE)
     _metric_box(pdf, x0 + 47, 30, 43, 28, "Puissance", f"{best.Power_kW:.0f} kW", color=BLUE)
-    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisée", f"{_kwh(import_avoided)} kWh", "Achats reseau evites", color=GREEN)
+    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisée", f"{_kwh(import_avoided)} kWh", "Achats reseau evités", color=GREEN)
 
     y = 67
     w = 34
@@ -385,12 +385,12 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     gap = 3
     _metric_box(pdf, x0, y, w, h, "Import avant", f"{_kwh(sim.import_before)} kWh", "Depuis le reseau", color=BLUE)
     _metric_box(pdf, x0 + (w + gap), y, w, h, "Import apres", f"{_kwh(import_after)} kWh", "Depuis le reseau", color=BLUE)
-    _metric_box(pdf, x0 + 2 * (w + gap), y, w, h, "Import evite", f"{_kwh(import_avoided)} kWh", f"-{import_reduc:.0f} %", color=GREEN)
+    _metric_box(pdf, x0 + 2 * (w + gap), y, w, h, "Import evité", f"{_kwh(import_avoided)} kWh", f"-{import_reduc:.0f} %", color=GREEN)
     _metric_box(pdf, x0 + 3 * (w + gap), y, w, h, "Export avant", f"{_kwh(sim.export_before)} kWh", "Vers le reseau", color=ORANGE)
 
     y2 = 99
     _metric_box(pdf, x0, y2, w, h, "Export apres", f"{_kwh(export_after)} kWh", "Vers le reseau", color=ORANGE)
-    _metric_box(pdf, x0 + (w + gap), y2, w, h, "Export evite", f"{_kwh(export_avoided)} kWh", f"-{export_reduc:.0f} %", color=GREEN)
+    _metric_box(pdf, x0 + (w + gap), y2, w, h, "Export evité", f"{_kwh(export_avoided)} kWh", f"-{export_reduc:.0f} %", color=GREEN)
     _metric_box(pdf, x0 + 2 * (w + gap), y2, w, h, "Surplus capte", f"{sim.surplus_captured:.0%}", "du surplus solaire", color=ORANGE)
     _metric_box(pdf, x0 + 3 * (w + gap), y2, w, h, "Cycles", f"{best.Cycles_per_year:.0f}/an", "equivalents", color=PURPLE)
 
@@ -452,8 +452,8 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         "FLUX RESEAU",
         f"Import avant : {_kwh(sim.import_before)} kWh\n"
         f"Import apres : {_kwh(import_after)} kWh\n"
-        f"Import evite : {_kwh(import_avoided)} kWh (-{import_reduc:.0f}%)\n"
-        f"Export evite : {_kwh(export_avoided)} kWh (-{export_reduc:.0f}%)",
+        f"Import evité : {_kwh(import_avoided)} kWh (-{import_reduc:.0f}%)\n"
+        f"Export evité : {_kwh(export_avoided)} kWh (-{export_reduc:.0f}%)",
         fill=LIGHT_BG,
         border=BORDER,
     )
