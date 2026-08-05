@@ -306,7 +306,7 @@ def _plot_monthly_import(df, sim) -> BytesIO:
         label="Import apres batterie",
     )
     ax.set_ylabel("kWh/mois", fontsize=9)
-    ax.set_title("Import reseau mensuel avant / apres batterie", fontsize=11, weight="bold", pad=10)
+    ax.set_title("Import réseau mensuel avant / apres batterie", fontsize=11, weight="bold", pad=10)
     ax.legend(ncol=2, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22), frameon=False)
     ax.grid(alpha=0.18)
     ax.tick_params(axis="x", rotation=0, labelsize=8)
@@ -344,7 +344,7 @@ def _plot_monthly_export(df, sim) -> BytesIO:
         label="Export apres batterie",
     )
     ax.set_ylabel("kWh/mois", fontsize=9)
-    ax.set_title("Export reseau mensuel avant / apres batterie", fontsize=11, weight="bold", pad=10)
+    ax.set_title("Export réseau mensuel avant / apres batterie", fontsize=11, weight="bold", pad=10)
     ax.legend(ncol=2, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22), frameon=False)
     ax.grid(alpha=0.18)
     ax.tick_params(axis="x", rotation=0, labelsize=8)
@@ -377,26 +377,26 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     # Main metrics
     _metric_box(pdf, x0, 30, 43, 28, "Capacité", f"{best.Cap_kWh:.0f} kWh", color=BLUE)
     _metric_box(pdf, x0 + 47, 30, 43, 28, "Puissance", f"{best.Power_kW:.0f} kW", color=BLUE)
-    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisée", f"{_kwh(import_avoided)} kWh", "Achats reseau evités", color=GREEN)
+    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisée", f"{_kwh(import_avoided)} kWh", "Achats réseau evités", color=GREEN)
 
     y = 67
     w = 34
     h = 26
     gap = 3
-    _metric_box(pdf, x0, y, w, h, "Import avant", f"{_kwh(sim.import_before)} kWh", "Depuis le reseau", color=BLUE)
-    _metric_box(pdf, x0 + (w + gap), y, w, h, "Import apres", f"{_kwh(import_after)} kWh", "Depuis le reseau", color=BLUE)
+    _metric_box(pdf, x0, y, w, h, "Import avant", f"{_kwh(sim.import_before)} kWh", "Depuis le réseau", color=BLUE)
+    _metric_box(pdf, x0 + (w + gap), y, w, h, "Import apres", f"{_kwh(import_after)} kWh", "Depuis le réseau", color=BLUE)
     _metric_box(pdf, x0 + 2 * (w + gap), y, w, h, "Import evité", f"{_kwh(import_avoided)} kWh", f"-{import_reduc:.0f} %", color=GREEN)
-    _metric_box(pdf, x0 + 3 * (w + gap), y, w, h, "Export avant", f"{_kwh(sim.export_before)} kWh", "Vers le reseau", color=ORANGE)
+    _metric_box(pdf, x0 + 3 * (w + gap), y, w, h, "Export avant", f"{_kwh(sim.export_before)} kWh", "Vers le réseau", color=ORANGE)
 
     y2 = 99
-    _metric_box(pdf, x0, y2, w, h, "Export apres", f"{_kwh(export_after)} kWh", "Vers le reseau", color=ORANGE)
+    _metric_box(pdf, x0, y2, w, h, "Export apres", f"{_kwh(export_after)} kWh", "Vers le réseau", color=ORANGE)
     _metric_box(pdf, x0 + (w + gap), y2, w, h, "Export evité", f"{_kwh(export_avoided)} kWh", f"-{export_reduc:.0f} %", color=GREEN)
     _metric_box(pdf, x0 + 2 * (w + gap), y2, w, h, "Surplus capté", f"{sim.surplus_captured:.0%}", "du surplus solaire", color=ORANGE)
     _metric_box(pdf, x0 + 3 * (w + gap), y2, w, h, "Cycles", f"{best.Cycles_per_year:.0f}/an", "equivalents", color=PURPLE)
 
     conclusion = (
         f"Une batterie de {best.Cap_kWh:.0f} kWh permet de stocker {_kwh(export_avoided)} kWh/an de surplus solaire "
-        f"et d'éviter {_kwh(import_avoided)} kWh/an d'achat reseau. "
+        f"et d'éviter {_kwh(import_avoided)} kWh/an d'achat réseau. "
         f"Cette capacité represente un bon compromis entre énergie valorisée et capacité installée. "
         f"Les hypotheses techniques sont indiquées dans l'analyse detaillée."
     )
@@ -427,7 +427,7 @@ def _page_2(pdf, df, meta, rec, best, big, sim):
     pdf.set_xy(10, 275)
     pdf.set_font("Arial", "", 7)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'énergie achetée au reseau qui peut etre evitée selon la capacité batterie. Les deux courbes mensuelles separent l'effet de la batterie sur l'import et sur l'export reseau."))
+    pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'énergie achetée au réseau qui peut etre evitée selon la capacité batterie. Les deux courbes mensuelles separent l'effet de la batterie sur l'import et sur l'export réseau."))
 
 
 def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export):
@@ -449,7 +449,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         25,
         90,
         34,
-        "FLUX RESEAU",
+        "FLUX RÉSEAU",
         f"Import avant : {_kwh(sim.import_before)} kWh\n"
         f"Import apres : {_kwh(import_after)} kWh\n"
         f"Import evité : {_kwh(import_avoided)} kWh (-{import_reduc:.0f}%)\n"
@@ -493,7 +493,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         188,
         38,
         "LECTURE DES RESULTATS",
-        f"La batterie permet de reduire les achats reseau de {import_reduc:.0f}% et l'injection de {export_reduc:.0f}%. "
+        f"La batterie permet de reduire les achats réseau de {import_reduc:.0f}% et l'injection de {export_reduc:.0f}%. "
         f"Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire, avec environ {best.Cycles_per_year:.0f} cycles equivalents par an. "
         "La capacité retenue correspond au meilleur compromis entre l'énergie valorisee, la puissance disponible et l'utilisation annuelle de la batterie.",
         fill=LIGHT_BG,
