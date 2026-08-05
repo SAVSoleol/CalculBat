@@ -46,14 +46,14 @@ def _tx(s) -> str:
         "’": "'",
         "œ": "oe",
         "…": "...",
-        "é": "e",
-        "è": "e",
-        "ê": "e",
-        "à": "a",
-        "ç": "c",
-        "É": "E",
-        "À": "A",
-        "Ç": "C",
+        "é": "é",
+        "è": "è",
+        "ê": "ê",
+        "à": "à",
+        "ç": "ç",
+        "É": "É",
+        "À": "À",
+        "Ç": "Ç",
     }
     s = str(s)
     for k, v in repl.items():
@@ -101,7 +101,7 @@ def _metric_box(pdf: FPDF, x: float, y: float, w: float, h: float, label: str, v
     pdf.set_fill_color(255, 255, 255)
     pdf.rect(x, y, w, h, style="DF")
     pdf.set_xy(x + 4, y + 4)
-    pdf.set_font("Arial", "B", 7)
+    pdf.set_font("Arial", "B", 8)
     pdf.set_text_color(*MUTED)
     pdf.cell(w - 8, 4, _tx(label.upper()), ln=True)
     pdf.set_xy(x + 4, y + 11)
@@ -110,7 +110,7 @@ def _metric_box(pdf: FPDF, x: float, y: float, w: float, h: float, label: str, v
     pdf.cell(w - 8, 7, _tx(value), ln=True)
     if sub:
         pdf.set_xy(x + 4, y + h - 8)
-        pdf.set_font("Arial", "", 7)
+        pdf.set_font("Arial", "", 8)
         pdf.set_text_color(*MUTED)
         pdf.cell(w - 8, 4, _tx(sub))
 
@@ -124,7 +124,7 @@ def _info_box(pdf: FPDF, x: float, y: float, w: float, h: float, title: str, tex
     pdf.set_text_color(*border)
     pdf.cell(w - 10, 5, _tx(title), ln=True)
     pdf.set_xy(x + 5, y + 11)
-    pdf.set_font("Arial", "", 7)
+    pdf.set_font("Arial", "", 9)
     pdf.set_text_color(*TEXT)
     pdf.multi_cell(w - 10, 4, _tx(text))
 
@@ -396,14 +396,14 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
 
     conclusion = (
         f"Une batterie de {best.Cap_kWh:.0f} kWh permet de stocker {_kwh(export_avoided)} kWh/an de surplus solaire "
-        f"et d'eviter {_kwh(import_avoided)} kWh/an d'achat reseau. "
-        f"Cette capacite represente un bon compromis entre energie valorisee et capacite installee. "
-        f"Les hypotheses techniques sont indiquees dans l'analyse detaillee."
+        f"et d'éviter {_kwh(import_avoided)} kWh/an d'achat reseau. "
+        f"Cette capacité represente un bon compromis entre énergie valorisée et capacité installée. "
+        f"Les hypotheses techniques sont indiquées dans l'analyse detaillée."
     )
     _info_box(pdf, x0, 137, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
 
     pdf.set_xy(x0, 184)
-    pdf.set_font("Arial", "", 7)
+    pdf.set_font("Arial", "", 9)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(145, 4, _tx("Les resultats sont bases sur les mesures reelles import/export et les tarifs renseignes. Les valeurs sont arrondies."))
 
