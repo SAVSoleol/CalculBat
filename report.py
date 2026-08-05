@@ -391,7 +391,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     y2 = 99
     _metric_box(pdf, x0, y2, w, h, "Export apres", f"{_kwh(export_after)} kWh", "Vers le reseau", color=ORANGE)
     _metric_box(pdf, x0 + (w + gap), y2, w, h, "Export evité", f"{_kwh(export_avoided)} kWh", f"-{export_reduc:.0f} %", color=GREEN)
-    _metric_box(pdf, x0 + 2 * (w + gap), y2, w, h, "Surplus capte", f"{sim.surplus_captured:.0%}", "du surplus solaire", color=ORANGE)
+    _metric_box(pdf, x0 + 2 * (w + gap), y2, w, h, "Surplus capté", f"{sim.surplus_captured:.0%}", "du surplus solaire", color=ORANGE)
     _metric_box(pdf, x0 + 3 * (w + gap), y2, w, h, "Cycles", f"{best.Cycles_per_year:.0f}/an", "equivalents", color=PURPLE)
 
     conclusion = (
