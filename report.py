@@ -481,7 +481,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     )
     _metric_box(
         pdf, x0 + 3 * (w + gap), y_top, w, h_top,
-        "Autoconsommation",
+        "Surplus capté",
         f"+{sim.surplus_captured:.0%}",
         "",
         color=ORANGE,
