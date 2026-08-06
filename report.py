@@ -31,6 +31,13 @@ LIGHT_ORANGE = (255, 244, 239)
 LIGHT_GREEN = (236, 253, 245)
 BORDER = (220, 225, 230)
 
+CARD_TITLE_SIZE = 7
+CARD_VALUE_SIZE = 14
+CARD_SUB_SIZE = 7
+SIDEBAR_LABEL_SIZE = 7.5
+SIDEBAR_VALUE_SIZE = 8.2
+FOOTER_SIZE = 7
+
 
 def _tx(s) -> str:
     repl = {
@@ -84,9 +91,11 @@ class ReportPDF(FPDF):
 
     def footer(self):
         self.set_y(-10)
-        self.set_font("Arial", "", 7)
+        self.set_font("Arial", "", FOOTER_SIZE)
         self.set_text_color(*MUTED)
-        self.cell(0, 5, _tx(f"Battery Sizer - page {self.page_no()}"), align="C")
+        self.cell(0, 5, _tx("SOLEOL - Battery Sizer"), align="L")
+        self.set_y(-10)
+        self.cell(0, 5, _tx(f"Page {self.page_no()} / {{nb}}"), align="R")
 
 
 def _add_section_title(pdf: FPDF, title: str, x: float, y: float, w: float):
@@ -106,27 +115,27 @@ def _metric_box(
     value: str,
     sub: str = "",
     color=BLUE,
-    label_size: float = 7.5,
+    label_size: float = CARD_TITLE_SIZE,
+    value_size: float = CARD_VALUE_SIZE,
+    sub_size: float = CARD_SUB_SIZE,
 ):
     pdf.set_draw_color(*BORDER)
     pdf.set_fill_color(255, 255, 255)
     pdf.rect(x, y, w, h, style="DF")
 
-    # Les titres peuvent être répartis sur deux lignes sans être tronqués.
     pdf.set_xy(x + 4, y + 4)
     pdf.set_font("Arial", "B", label_size)
-    pdf.set_text_color(*MUTED)
+    pdf.set_text_color(*TEXT)
     pdf.multi_cell(w - 8, 4, _tx(label.upper()), align="L")
 
-    # Le chiffre principal reste aligné à la même hauteur sur toutes les cartes.
     pdf.set_xy(x + 4, y + 13)
-    pdf.set_font("Arial", "B", 12)
+    pdf.set_font("Arial", "B", value_size)
     pdf.set_text_color(*color)
-    pdf.cell(w - 8, 7, _tx(value), ln=True)
+    pdf.cell(w - 8, 8, _tx(value), ln=True)
 
     if sub:
         pdf.set_xy(x + 4, y + h - 9)
-        pdf.set_font("Arial", "", 7.5)
+        pdf.set_font("Arial", "", sub_size)
         pdf.set_text_color(*MUTED)
         pdf.multi_cell(w - 8, 4, _tx(sub), align="L")
 
@@ -174,10 +183,8 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
 
     resolved_logo = _resolve_logo_path(logo_path)
     if resolved_logo:
-        # Logo sur fond sombre, conserve ses proportions dans une zone de 36 x 18 mm.
         pdf.image(resolved_logo, x=8, y=11, w=36)
     else:
-        # Solution de secours si aucun fichier logo n'est présent.
         pdf.set_xy(8, 12)
         pdf.set_font("Arial", "B", 16)
         pdf.set_text_color(255, 255, 255)
@@ -187,8 +194,11 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         pdf.set_text_color(230, 235, 240)
         pdf.cell(36, 5, "ÉNERGIE SOLAIRE", ln=True)
 
+    pdf.set_draw_color(*SOLEOL_ORANGE)
+    pdf.line(8, 60, 20, 60)
+
     pdf.set_xy(8, 66)
-    pdf.set_font("Arial", "B", 6.7)
+    pdf.set_font("Arial", "B", 7)
     pdf.set_text_color(255, 255, 255)
     pdf.multi_cell(
         36,
@@ -196,26 +206,32 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         _tx("ETUDE DE\nDIMENSIONNEMENT\nBATTERIE"),
     )
 
+    pdf.line(8, 84, 20, 84)
+
     infos = [
-        ("Client", "A renseigner"),
+        ("CLIENT", "A renseigner"),
         ("GRD", tariff_profile),
-        ("Periode", f"{getattr(meta, 'coverage_days', 0):.0f} jours"),
-        ("Pas de temps", f"{getattr(meta, 'dt_hours', 0) * 60:.0f} min"),
-        ("Source", getattr(meta, "vendor", "")),
+        ("PÉRIODE", f"{getattr(meta, 'coverage_days', 0):.0f} jours"),
+        ("PAS DE TEMPS", f"{getattr(meta, 'dt_hours', 0) * 60:.0f} min"),
+        ("SOURCE", getattr(meta, "vendor", "")),
     ]
-    y = 78
+
+    y = 92
     for label, val in infos:
         pdf.set_xy(8, y)
-        pdf.set_font("Arial", "B", 7.5)
-        pdf.set_text_color(180, 190, 200)
+        pdf.set_font("Arial", "B", SIDEBAR_LABEL_SIZE)
+        pdf.set_text_color(*SOLEOL_ORANGE)
         pdf.cell(36, 4, _tx(label), ln=True)
+
         pdf.set_x(8)
-        pdf.set_font("Arial", "", 8.2)
+        pdf.set_font("Arial", "", SIDEBAR_VALUE_SIZE)
         pdf.set_text_color(255, 255, 255)
         pdf.multi_cell(36, 4, _tx(val))
-        y += 15
+        y += 17
 
-    pdf.set_xy(8, 255)
+    pdf.line(8, 180, 20, 180)
+
+    pdf.set_xy(8, 214)
     pdf.set_font("Arial", "B", 9)
     pdf.set_text_color(*SOLEOL_ORANGE)
     pdf.multi_cell(
@@ -409,14 +425,16 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         "Capacité\nrecommandée",
         f"{best.Cap_kWh:.0f} kWh",
         color=BLUE,
-        label_size=7.2,
+        label_size=6.8,
+        value_size=14,
     )
     _metric_box(
         pdf, x0 + (w + gap), y_top, w, h_top,
         "Puissance de charge\net décharge",
         f"{best.Power_kW:.0f} kW",
         color=BLUE,
-        label_size=6.2,
+        label_size=6.1,
+        value_size=14,
     )
     _metric_box(
         pdf, x0 + 2 * (w + gap), y_top, w, h_top,
@@ -424,6 +442,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"{best.Cycles_per_year:.0f}/an",
         "équivalents",
         color=PURPLE,
+        value_size=14,
     )
     _metric_box(
         pdf, x0 + 3 * (w + gap), y_top, w, h_top,
@@ -432,6 +451,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         "gain d'autoconsommation",
         color=ORANGE,
         label_size=5.8,
+        value_size=14,
     )
 
     # Ligne 2 : imports et énergie valorisée
@@ -475,16 +495,21 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     pdf.set_draw_color(*GREEN)
     pdf.line(energy_x + 5, energy_y + 21, energy_x + w - 5, energy_y + 21)
 
-    # Chiffre principal plus grand et centré verticalement.
-    pdf.set_xy(energy_x + 3, energy_y + 29)
-    pdf.set_font("Arial", "B", 16)
+    # Chiffre principal très visible, unité séparée.
+    pdf.set_xy(energy_x + 3, energy_y + 27)
+    pdf.set_font("Arial", "B", 18)
     pdf.set_text_color(*GREEN)
-    pdf.cell(w - 6, 9, _tx(f"{_kwh(valorisation_energetique)} kWh"), align="C")
+    pdf.cell(w - 6, 9, _tx(_kwh(valorisation_energetique)), align="C")
 
-    pdf.set_xy(energy_x + 5, energy_y + 44)
+    pdf.set_xy(energy_x + 3, energy_y + 37)
+    pdf.set_font("Arial", "B", 9)
+    pdf.set_text_color(*GREEN)
+    pdf.cell(w - 6, 6, "kWh", align="C")
+
+    pdf.set_xy(energy_x + 5, energy_y + 47)
     pdf.set_font("Arial", "", 6.8)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(w - 10, 4, _tx("Import évité + export évité"), align="C")
+    pdf.multi_cell(w - 10, 4, _tx("Import évité\n+\nexport évité"), align="C")
 
     # Ligne 3 : exports
     y_export = 101
@@ -516,9 +541,9 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"les achats d'électricité de {_kwh(import_avoided)} kWh et les injections réseau "
         f"de {_kwh(export_avoided)} kWh."
     )
-    _info_box(pdf, x0, 138, 144, 24, "CONCLUSION ENERGETIQUE", conclusion)
+    _info_box(pdf, x0, 138, 144, 22, "CONCLUSION", conclusion, fill=(255, 251, 249), border=SOLEOL_ORANGE)
 
-    pdf.set_xy(x0, 174)
+    pdf.set_xy(x0, 170)
     pdf.set_font("Arial", "", 10)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(145, 4, _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."))
@@ -549,8 +574,11 @@ def _page_2(pdf, df, meta, rec, best, big, sim):
 def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export):
     pdf.add_page()
     pdf.set_font("Arial", "B", 15)
-    pdf.set_text_color(*TEXT)
-    pdf.cell(0, 9, _tx("Analyse technique"), ln=True)
+    pdf.set_text_color(*SOLEOL_ORANGE)
+    pdf.cell(0, 9, _tx("ANALYSE TECHNIQUE"), ln=True)
+
+    pdf.set_draw_color(*BORDER)
+    pdf.line(10, 20, 198, 20)
 
     import_after = sim.import_after_total
     export_after = sim.export_after_total
@@ -560,74 +588,60 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
     export_reduc = _safe_pct(export_avoided, sim.export_before)
 
     _info_box(
-        pdf,
-        10,
-        25,
-        90,
-        34,
+        pdf, 10, 28, 90, 39,
         "FLUX RÉSEAU",
         f"Import avant : {_kwh(sim.import_before)} kWh\n"
-        f"Import apres : {_kwh(import_after)} kWh\n"
-        f"Import evité : {_kwh(import_avoided)} kWh (-{import_reduc:.0f}%)\n"
-        f"Export evité : {_kwh(export_avoided)} kWh (-{export_reduc:.0f}%)",
+        f"Import après : {_kwh(import_after)} kWh\n"
+        f"Import évité : {_kwh(import_avoided)} kWh (-{import_reduc:.0f}%)\n"
+        f"Export évité : {_kwh(export_avoided)} kWh (-{export_reduc:.0f}%)",
         fill=LIGHT_BG,
-        border=BORDER,
+        border=BLUE,
     )
 
     _info_box(
-        pdf,
-        108,
-        25,
-        90,
-        34,
+        pdf, 108, 28, 90, 39,
         "BATTERIE",
         f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
         f"Puissance : {best.Power_kW:.0f} kW\n"
-        f"Cycles equivalents : {best.Cycles_per_year:.0f} cycles/an\n"
+        f"Cycles équivalents : {best.Cycles_per_year:.0f} cycles/an\n"
         f"Capacité utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh",
         fill=LIGHT_GREEN,
         border=GREEN,
     )
 
     _info_box(
-        pdf,
-        10,
-        68,
-        188,
-        22,
-        "HYPOTHESES",
-        f"Profil GRD : {tariff_profile} | Pas de temps : {meta.dt_hours * 60:.0f} min | Couverture : {meta.coverage_days:.0f} jours | "
-        f"Tarifs utilises dans le calcul interne : HT {tariff_import_ht:.2f}, BT {tariff_import_bt:.2f}, rachat {tariff_export:.2f} CHF/kWh.",
+        pdf, 10, 76, 188, 26,
+        "HYPOTHÈSES",
+        f"Profil GRD : {tariff_profile} | Pas de temps : {meta.dt_hours * 60:.0f} min | "
+        f"Couverture : {meta.coverage_days:.0f} jours\n"
+        f"Tarifs : HT {tariff_import_ht:.2f}, BT {tariff_import_bt:.2f}, "
+        f"rachat {tariff_export:.2f} CHF/kWh.",
         fill=LIGHT_ORANGE,
         border=SOLEOL_ORANGE,
     )
 
     _info_box(
-        pdf,
-        10,
-        103,
-        188,
-        38,
-        "LECTURE DES RESULTATS",
-        f"La batterie permet de reduire les achats réseau de {import_reduc:.0f}% et l'injection de {export_reduc:.0f}%. "
-        f"Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire, avec environ {best.Cycles_per_year:.0f} cycles equivalents par an. "
-        "La capacité retenue correspond au meilleur compromis entre l'énergie valorisée, la puissance disponible et l'utilisation annuelle de la batterie.",
+        pdf, 10, 111, 188, 42,
+        "LECTURE DES RÉSULTATS",
+        f"La batterie réduit les achats réseau de {import_reduc:.0f}% et l'injection de "
+        f"{export_reduc:.0f}%. Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire "
+        f"avec environ {best.Cycles_per_year:.0f} cycles équivalents par an. "
+        "La capacité retenue correspond au meilleur compromis entre énergie valorisée, "
+        "puissance disponible et utilisation annuelle.",
         fill=LIGHT_BG,
         border=BLUE,
     )
 
     _info_box(
-        pdf,
-        10,
-        151,
-        188,
-        34,
+        pdf, 10, 162, 188, 38,
         "POINTS D'ATTENTION",
-        "Les resultats dependent du profil quart-horaire mesure, des tarifs d'achat et de reprise, du rendement de la batterie et de la capacite utile retenue. "
-        "Une evolution importante de la consommation ou de la production photovoltaïque peut modifier le dimensionnement optimal.",
+        "Les résultats dépendent du profil quart-horaire mesuré, des tarifs d'achat et de reprise, "
+        "du rendement de la batterie et de la capacité utile retenue. Une évolution importante "
+        "de la consommation ou de la production photovoltaïque peut modifier le dimensionnement optimal.",
         fill=LIGHT_ORANGE,
         border=SOLEOL_ORANGE,
     )
+
 
 def generate_battery_report(
     *,
@@ -650,6 +664,7 @@ def generate_battery_report(
     logo_path: str | None = None,
 ) -> bytes:
     pdf = ReportPDF(orientation="P", unit="mm", format="A4")
+    pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=12)
 
     _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, logo_path=logo_path)
