@@ -140,6 +140,41 @@ def _metric_box(
         pdf.multi_cell(w - 8, 4, _tx(sub), align="L")
 
 
+
+def _flow_metric_box(
+    pdf: FPDF,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    label: str,
+    value: str,
+    sub: str = "",
+    color=BLUE,
+):
+    pdf.set_draw_color(*BORDER)
+    pdf.set_fill_color(255, 255, 255)
+    pdf.rect(x, y, w, h, style="DF")
+
+    # Titre centré
+    pdf.set_xy(x + 3, y + 4)
+    pdf.set_font("Arial", "B", 7.2)
+    pdf.set_text_color(*TEXT)
+    pdf.cell(w - 6, 4, _tx(label.upper()), align="C")
+
+    # Valeur colorée plus petite et parfaitement centrée
+    pdf.set_xy(x + 3, y + 10.5)
+    pdf.set_font("Arial", "B", 12.5)
+    pdf.set_text_color(*color)
+    pdf.cell(w - 6, 8, _tx(value), align="C")
+
+    # Sous-titre centré
+    if sub:
+        pdf.set_xy(x + 3, y + h - 8)
+        pdf.set_font("Arial", "", 7)
+        pdf.set_text_color(*MUTED)
+        pdf.cell(w - 6, 4, _tx(sub), align="C")
+
 def _info_box(pdf: FPDF, x: float, y: float, w: float, h: float, title: str, text: str, fill=LIGHT_ORANGE, border=SOLEOL_ORANGE):
     pdf.set_draw_color(*border)
     pdf.set_fill_color(*fill)
@@ -430,10 +465,10 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     )
     _metric_box(
         pdf, x0 + (w + gap), y_top, w, h_top,
-        "Puissance de charge\net décharge",
+        "Puissance de charge",
         f"{best.Power_kW:.0f} kW",
         color=BLUE,
-        label_size=6.1,
+        label_size=7.0,
         value_size=14,
     )
     _metric_box(
@@ -448,7 +483,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         pdf, x0 + 3 * (w + gap), y_top, w, h_top,
         "Autoconsommation",
         f"+{sim.surplus_captured:.0%}",
-        "gain d'autoconsommation",
+        "",
         color=ORANGE,
         label_size=5.8,
         value_size=14,
@@ -456,21 +491,21 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
 
     # Ligne 2 : imports et énergie valorisée
     y_import = 67
-    _metric_box(
+    _flow_metric_box(
         pdf, x0, y_import, w, h_small,
         "Import avant",
         f"{_kwh(sim.import_before)} kWh",
         "Depuis le réseau",
         color=BLUE,
     )
-    _metric_box(
+    _flow_metric_box(
         pdf, x0 + (w + gap), y_import, w, h_small,
         "Import après",
         f"{_kwh(import_after)} kWh",
         "Depuis le réseau",
         color=BLUE,
     )
-    _metric_box(
+    _flow_metric_box(
         pdf, x0 + 2 * (w + gap), y_import, w, h_small,
         "Import évité",
         f"{_kwh(import_avoided)} kWh",
@@ -513,21 +548,21 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
 
     # Ligne 3 : exports
     y_export = 101
-    _metric_box(
+    _flow_metric_box(
         pdf, x0, y_export, w, h_small,
         "Export avant",
         f"{_kwh(sim.export_before)} kWh",
         "Vers le réseau",
         color=ORANGE,
     )
-    _metric_box(
+    _flow_metric_box(
         pdf, x0 + (w + gap), y_export, w, h_small,
         "Export après",
         f"{_kwh(export_after)} kWh",
         "Vers le réseau",
         color=ORANGE,
     )
-    _metric_box(
+    _flow_metric_box(
         pdf, x0 + 2 * (w + gap), y_export, w, h_small,
         "Export évité",
         f"{_kwh(export_avoided)} kWh",
