@@ -485,7 +485,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"+{sim.surplus_captured:.0%}",
         "",
         color=ORANGE,
-        label_size=5.8,
+        label_size=6,
         value_size=14,
     )
 
