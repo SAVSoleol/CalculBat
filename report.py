@@ -169,7 +169,7 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         pdf.set_x(8)
         pdf.set_font("Arial", "", 8)
         pdf.set_text_color(230, 235, 240)
-        pdf.cell(36, 5, "ENERGIE SOLAIRE", ln=True)
+        pdf.cell(36, 5, "ÉNERGIE SOLAIRE", ln=True)
 
     pdf.set_xy(8, 68)
     pdf.set_font("Arial", "B", 8)
@@ -225,7 +225,7 @@ def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
         zorder=3,
         color="#1565C0",
     )
-    ax.set_title("Energie valorisée selon la capacité batterie", fontsize=11, weight="bold")
+    ax.set_title("Énergie valorisée selon la capacité batterie", fontsize=11, weight="bold")
     ax.set_xlabel("Capacité batterie (kWh)", fontsize=9, labelpad=8)
     ax.set_ylabel("Import evité (kWh/an)", fontsize=9)
     ax.grid(alpha=0.22)
@@ -377,7 +377,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     # Main metrics
     _metric_box(pdf, x0, 30, 43, 28, "Capacité", f"{best.Cap_kWh:.0f} kWh", color=BLUE)
     _metric_box(pdf, x0 + 47, 30, 43, 28, "Puissance", f"{best.Power_kW:.0f} kW", color=BLUE)
-    _metric_box(pdf, x0 + 94, 30, 50, 28, "Energie valorisée", f"{_kwh(import_avoided)} kWh", "Achats réseau evités", color=GREEN)
+    _metric_box(pdf, x0 + 94, 30, 50, 28, "Énergie valorisée", f"{_kwh(import_avoided)} kWh", "Achats réseau evités", color=GREEN)
 
     y = 67
     w = 34
@@ -495,7 +495,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         "LECTURE DES RESULTATS",
         f"La batterie permet de reduire les achats réseau de {import_reduc:.0f}% et l'injection de {export_reduc:.0f}%. "
         f"Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire, avec environ {best.Cycles_per_year:.0f} cycles equivalents par an. "
-        "La capacité retenue correspond au meilleur compromis entre l'énergie valorisee, la puissance disponible et l'utilisation annuelle de la batterie.",
+        "La capacité retenue correspond au meilleur compromis entre l'énergie valorisée, la puissance disponible et l'utilisation annuelle de la batterie.",
         fill=LIGHT_BG,
         border=BLUE,
     )
