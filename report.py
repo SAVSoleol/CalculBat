@@ -172,7 +172,7 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         pdf.cell(36, 5, "ÉNERGIE SOLAIRE", ln=True)
 
     pdf.set_xy(8, 68)
-    pdf.set_font("Arial", "B", 8)
+    pdf.set_font("Arial", "B", 7)
     pdf.set_text_color(255, 255, 255)
     pdf.multi_cell(
         36,
@@ -187,7 +187,7 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         ("Pas de temps", f"{getattr(meta, 'dt_hours', 0) * 60:.0f} min"),
         ("Source", getattr(meta, "vendor", "")),
     ]
-    y = 84
+    y = 80
     for label, val in infos:
         pdf.set_xy(8, y)
         pdf.set_font("Arial", "B", 7)
@@ -385,13 +385,13 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     y_top = 30
     _metric_box(
         pdf, x0, y_top, w, h_top,
-        "Capacité recommandée",
+        "Capacité\nrecommandée",
         f"{best.Cap_kWh:.0f} kWh",
         color=BLUE,
     )
     _metric_box(
         pdf, x0 + (w + gap), y_top, w, h_top,
-        "Puissance de charge et décharge",
+        "Puissance de\ncharge / décharge",
         f"{best.Power_kW:.0f} kW",
         color=BLUE,
     )
@@ -406,7 +406,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         pdf, x0 + 3 * (w + gap), y_top, w, h_top,
         "Autoconsommation",
         f"+{sim.surplus_captured:.0%}",
-        "du surplus solaire",
+        "gain d'autoconsommation",
         color=ORANGE,
     )
 
@@ -435,18 +435,33 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     )
 
     valorisation_energetique = import_avoided + export_avoided
-    _info_box(
-        pdf,
-        x0 + 3 * (w + gap),
-        y_import,
-        w,
-        61,
-        "VALORISATION ÉNERGÉTIQUE",
-        f"{_kwh(valorisation_energetique)} kWh\n\n"
-        "(Import évité + export évité)",
-        fill=LIGHT_GREEN,
-        border=GREEN,
+    # Grande carte à droite, sur la hauteur des deux lignes import/export.
+    pdf.set_draw_color(*GREEN)
+    pdf.set_fill_color(*LIGHT_GREEN)
+    pdf.rect(x0 + 3 * (w + gap), y_import, w, 61, style="DF")
+
+    pdf.set_xy(x0 + 3 * (w + gap) + 4, y_import + 6)
+    pdf.set_font("Arial", "B", 8)
+    pdf.set_text_color(*GREEN)
+    pdf.multi_cell(w - 8, 4, _tx("ÉNERGIE\nVALORISÉE"), align="C")
+
+    pdf.set_draw_color(*GREEN)
+    pdf.line(
+        x0 + 3 * (w + gap) + 5,
+        y_import + 20,
+        x0 + 4 * (w + gap) - gap - 5,
+        y_import + 20,
     )
+
+    pdf.set_xy(x0 + 3 * (w + gap) + 4, y_import + 28)
+    pdf.set_font("Arial", "B", 14)
+    pdf.set_text_color(*GREEN)
+    pdf.cell(w - 8, 8, _tx(f"{_kwh(valorisation_energetique)} kWh"), align="C")
+
+    pdf.set_xy(x0 + 3 * (w + gap) + 4, y_import + 45)
+    pdf.set_font("Arial", "", 7)
+    pdf.set_text_color(*MUTED)
+    pdf.multi_cell(w - 8, 4, _tx("Import évité + export évité"), align="C")
 
     # Ligne 3 : exports
     y_export = 102
@@ -473,10 +488,10 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     )
 
     conclusion = (
-        f"Une batterie de {best.Cap_kWh:.0f} kWh permet de stocker {_kwh(export_avoided)} kWh/an de surplus solaire "
-        f"et d'éviter {_kwh(import_avoided)} kWh/an d'achat réseau. "
-        f"Cette capacité represente un bon compromis entre énergie valorisée et capacité installée. "
-        f"Les hypotheses techniques sont indiquées dans l'analyse detaillée."
+        f"Une batterie de {best.Cap_kWh:.0f} kWh permet de valoriser environ "
+        f"{_kwh(valorisation_energetique)} kWh d'énergie solaire par an, en réduisant "
+        f"les achats d'électricité de {_kwh(import_avoided)} kWh et les injections réseau "
+        f"de {_kwh(export_avoided)} kWh."
     )
     _info_box(pdf, x0, 141, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
 
