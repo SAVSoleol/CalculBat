@@ -377,10 +377,16 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     _side_bar(pdf, meta, tariff_profile, logo_path=logo_path)
 
     x0 = 58
+    content_w = 145
+
     pdf.set_xy(x0, 14)
     pdf.set_font("Arial", "B", 17)
     pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(140, 8, _tx("SYNTHESE ÉNERGÉTIQUE"), ln=True)
+    pdf.cell(content_w, 8, _tx("SYNTHESE ÉNERGÉTIQUE"), ln=True)
+
+    # Trait discret sous le titre.
+    pdf.set_draw_color(*BORDER)
+    pdf.line(x0, 25, x0 + content_w, 25)
 
     import_after = sim.import_after_total
     export_after = sim.export_after_total
@@ -388,122 +394,141 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     export_avoided = sim.export_stored
     import_reduc = _safe_pct(import_avoided, sim.import_before)
     export_reduc = _safe_pct(export_avoided, sim.export_before)
+    valorisation_energetique = import_avoided + export_avoided
 
-
-    # Mise en page des indicateurs
-    # Les cartes sont légèrement plus larges et les espacements uniformes.
-    w = 35
+    # Grille : trois colonnes principales et une colonne de synthèse.
+    card_w = 36
     gap = 2
-    h_top = 31
-    h_small = 27
+    summary_gap = 3
+    summary_x = x0 + 3 * card_w + 2 * gap + summary_gap
+    summary_w = x0 + content_w - summary_x
 
-    # Ligne 1 : caractéristiques principales
-    y_top = 30
+    top_y = 31
+    top_h = 31
+    row_h = 27
+    import_y = 68
+    export_y = 102
+
+    # Ligne supérieure : dimensionnement.
     _metric_box(
-        pdf, x0, y_top, w, h_top,
+        pdf, x0, top_y, card_w, top_h,
         "Capacité\nrecommandée",
         f"{best.Cap_kWh:.0f} kWh",
-        color=BLUE,
-        label_size=7.2,
-    )
-    _metric_box(
-        pdf, x0 + (w + gap), y_top, w, h_top,
-        "Puissance de\ncharge / décharge",
-        f"{best.Power_kW:.0f} kW",
         color=BLUE,
         label_size=7.0,
     )
     _metric_box(
-        pdf, x0 + 2 * (w + gap), y_top, w, h_top,
+        pdf, x0 + card_w + gap, top_y, card_w, top_h,
+        "Puissance de charge\n/ décharge",
+        f"{best.Power_kW:.0f} kW",
+        color=BLUE,
+        label_size=6.6,
+    )
+    _metric_box(
+        pdf, x0 + 2 * (card_w + gap), top_y, card_w, top_h,
         "Cycles",
         f"{best.Cycles_per_year:.0f}/an",
         "équivalents",
         color=PURPLE,
-    )
-    _metric_box(
-        pdf, x0 + 3 * (w + gap), y_top, w, h_top,
-        "Autoconsommation",
-        f"+{sim.surplus_captured:.0%}",
-        "gain d'autoconsommation",
-        color=ORANGE,
-        label_size=7.1,
+        label_size=7.2,
     )
 
-    # Ligne 2 : imports et énergie valorisée
-    y_import = 67
+    # Colonne de synthèse : autoconsommation.
+    pdf.set_draw_color(*BORDER)
+    pdf.set_fill_color(255, 255, 255)
+    pdf.rect(summary_x, top_y, summary_w, top_h, style="DF")
+
+    pdf.set_xy(summary_x + 3, top_y + 4)
+    pdf.set_font("Arial", "B", 6.5)
+    pdf.set_text_color(*MUTED)
+    pdf.multi_cell(summary_w - 6, 4, _tx("AUTOCONSOMMATION"), align="C")
+
+    pdf.set_xy(summary_x + 3, top_y + 13)
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_text_color(*ORANGE)
+    pdf.cell(summary_w - 6, 7, _tx(f"+{sim.surplus_captured:.0%}"), align="C")
+
+    pdf.set_xy(summary_x + 3, top_y + 23)
+    pdf.set_font("Arial", "", 6.3)
+    pdf.set_text_color(*MUTED)
+    pdf.multi_cell(summary_w - 6, 3.5, _tx("gain d'autoconsommation"), align="C")
+
+    # Ligne import.
     _metric_box(
-        pdf, x0, y_import, w, h_small,
+        pdf, x0, import_y, card_w, row_h,
         "Import avant",
         f"{_kwh(sim.import_before)} kWh",
         "Depuis le réseau",
         color=BLUE,
     )
     _metric_box(
-        pdf, x0 + (w + gap), y_import, w, h_small,
+        pdf, x0 + card_w + gap, import_y, card_w, row_h,
         "Import après",
         f"{_kwh(import_after)} kWh",
         "Depuis le réseau",
         color=BLUE,
     )
     _metric_box(
-        pdf, x0 + 2 * (w + gap), y_import, w, h_small,
+        pdf, x0 + 2 * (card_w + gap), import_y, card_w, row_h,
         "Import évité",
         f"{_kwh(import_avoided)} kWh",
         f"-{import_reduc:.0f} %",
         color=GREEN,
     )
 
-    valorisation_energetique = import_avoided + export_avoided
-    energy_x = x0 + 3 * (w + gap)
-    energy_y = y_import
-    energy_h = 61
-
-    pdf.set_draw_color(*GREEN)
-    pdf.set_fill_color(*LIGHT_GREEN)
-    pdf.rect(energy_x, energy_y, w, energy_h, style="DF")
-
-    pdf.set_xy(energy_x + 4, energy_y + 7)
-    pdf.set_font("Arial", "B", 8)
-    pdf.set_text_color(*GREEN)
-    pdf.multi_cell(w - 8, 4, _tx("ÉNERGIE\nVALORISÉE"), align="C")
-
-    pdf.set_draw_color(*GREEN)
-    pdf.line(energy_x + 5, energy_y + 21, energy_x + w - 5, energy_y + 21)
-
-    # Chiffre principal plus grand et centré verticalement.
-    pdf.set_xy(energy_x + 3, energy_y + 29)
-    pdf.set_font("Arial", "B", 16)
-    pdf.set_text_color(*GREEN)
-    pdf.cell(w - 6, 9, _tx(f"{_kwh(valorisation_energetique)} kWh"), align="C")
-
-    pdf.set_xy(energy_x + 5, energy_y + 48)
-    pdf.set_font("Arial", "", 6.8)
-    pdf.set_text_color(*MUTED)
-    pdf.multi_cell(w - 10, 4, _tx("Import évité + export évité"), align="C")
-
-    # Ligne 3 : exports
-    y_export = 101
+    # Ligne export.
     _metric_box(
-        pdf, x0, y_export, w, h_small,
+        pdf, x0, export_y, card_w, row_h,
         "Export avant",
         f"{_kwh(sim.export_before)} kWh",
         "Vers le réseau",
         color=ORANGE,
     )
     _metric_box(
-        pdf, x0 + (w + gap), y_export, w, h_small,
+        pdf, x0 + card_w + gap, export_y, card_w, row_h,
         "Export après",
         f"{_kwh(export_after)} kWh",
         "Vers le réseau",
         color=ORANGE,
     )
     _metric_box(
-        pdf, x0 + 2 * (w + gap), y_export, w, h_small,
+        pdf, x0 + 2 * (card_w + gap), export_y, card_w, row_h,
         "Export évité",
         f"{_kwh(export_avoided)} kWh",
         f"-{export_reduc:.0f} %",
         color=GREEN,
     )
+
+    # Grande carte de synthèse sur la hauteur des lignes import/export.
+    energy_y = import_y
+    energy_h = export_y + row_h - import_y
+
+    pdf.set_draw_color(*GREEN)
+    pdf.set_fill_color(*LIGHT_GREEN)
+    pdf.rect(summary_x, energy_y, summary_w, energy_h, style="DF")
+
+    pdf.set_xy(summary_x + 3, energy_y + 8)
+    pdf.set_font("Arial", "B", 7.2)
+    pdf.set_text_color(*GREEN)
+    pdf.multi_cell(summary_w - 6, 4, _tx("ÉNERGIE\nVALORISÉE"), align="C")
+
+    pdf.line(summary_x + 4, energy_y + 23, summary_x + summary_w - 4, energy_y + 23)
+
+    # Valeur mise en avant sur deux lignes pour éviter tout débordement.
+    pdf.set_xy(summary_x + 2, energy_y + 31)
+    pdf.set_font("Arial", "B", 17)
+    pdf.set_text_color(*GREEN)
+    pdf.cell(summary_w - 4, 9, _tx(_kwh(valorisation_energetique)), align="C")
+
+    pdf.set_xy(summary_x + 2, energy_y + 41)
+    pdf.set_font("Arial", "B", 9)
+    pdf.set_text_color(*GREEN)
+    pdf.cell(summary_w - 4, 6, "kWh", align="C")
+
+    pdf.set_xy(summary_x + 3, energy_y + 56)
+    pdf.set_font("Arial", "", 6.2)
+    pdf.set_text_color(*MUTED)
+    pdf.multi_cell(summary_w - 6, 3.5, _tx("Import évité +\nexport évité"), align="C")
 
     conclusion = (
         f"Une batterie de {best.Cap_kWh:.0f} kWh permet de valoriser environ "
@@ -511,12 +536,29 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"les achats d'électricité de {_kwh(import_avoided)} kWh et les injections réseau "
         f"de {_kwh(export_avoided)} kWh."
     )
-    _info_box(pdf, x0, 138, 144, 24, "CONCLUSION ENERGETIQUE", conclusion)
+    _info_box(
+        pdf,
+        x0,
+        139,
+        content_w,
+        24,
+        "CONCLUSION ENERGETIQUE",
+        conclusion,
+        fill=(255, 251, 249),
+        border=SOLEOL_ORANGE,
+    )
 
-    pdf.set_xy(x0, 174)
-    pdf.set_font("Arial", "", 10)
+    pdf.set_xy(x0, 175)
+    pdf.set_font("Arial", "", 9)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(145, 4, _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."))
+    pdf.multi_cell(
+        content_w,
+        4,
+        _tx(
+            "Les résultats sont basés sur les mesures réelles import/export et les tarifs "
+            "renseignés. Les valeurs sont arrondies."
+        ),
+    )
 
 
 def _page_2(pdf, df, meta, rec, best, big, sim):
