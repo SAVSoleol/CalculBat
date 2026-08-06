@@ -96,23 +96,39 @@ def _add_section_title(pdf: FPDF, title: str, x: float, y: float, w: float):
     pdf.cell(w, 8, _tx(title), ln=False)
 
 
-def _metric_box(pdf: FPDF, x: float, y: float, w: float, h: float, label: str, value: str, sub: str = "", color=BLUE):
+def _metric_box(
+    pdf: FPDF,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    label: str,
+    value: str,
+    sub: str = "",
+    color=BLUE,
+    label_size: float = 7.5,
+):
     pdf.set_draw_color(*BORDER)
     pdf.set_fill_color(255, 255, 255)
     pdf.rect(x, y, w, h, style="DF")
+
+    # Les titres peuvent être répartis sur deux lignes sans être tronqués.
     pdf.set_xy(x + 4, y + 4)
-    pdf.set_font("Arial", "B", 8)
+    pdf.set_font("Arial", "B", label_size)
     pdf.set_text_color(*MUTED)
-    pdf.cell(w - 8, 4, _tx(label.upper()), ln=True)
-    pdf.set_xy(x + 4, y + 11)
+    pdf.multi_cell(w - 8, 4, _tx(label.upper()), align="L")
+
+    # Le chiffre principal reste aligné à la même hauteur sur toutes les cartes.
+    pdf.set_xy(x + 4, y + 13)
     pdf.set_font("Arial", "B", 12)
     pdf.set_text_color(*color)
     pdf.cell(w - 8, 7, _tx(value), ln=True)
+
     if sub:
-        pdf.set_xy(x + 4, y + h - 8)
-        pdf.set_font("Arial", "", 8)
+        pdf.set_xy(x + 4, y + h - 9)
+        pdf.set_font("Arial", "", 7.5)
         pdf.set_text_color(*MUTED)
-        pdf.cell(w - 8, 4, _tx(sub))
+        pdf.multi_cell(w - 8, 4, _tx(sub), align="L")
 
 
 def _info_box(pdf: FPDF, x: float, y: float, w: float, h: float, title: str, text: str, fill=LIGHT_ORANGE, border=SOLEOL_ORANGE):
@@ -171,8 +187,8 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         pdf.set_text_color(230, 235, 240)
         pdf.cell(36, 5, "ÉNERGIE SOLAIRE", ln=True)
 
-    pdf.set_xy(8, 68)
-    pdf.set_font("Arial", "B", 7)
+    pdf.set_xy(8, 66)
+    pdf.set_font("Arial", "B", 6.7)
     pdf.set_text_color(255, 255, 255)
     pdf.multi_cell(
         36,
@@ -187,17 +203,17 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         ("Pas de temps", f"{getattr(meta, 'dt_hours', 0) * 60:.0f} min"),
         ("Source", getattr(meta, "vendor", "")),
     ]
-    y = 80
+    y = 78
     for label, val in infos:
         pdf.set_xy(8, y)
-        pdf.set_font("Arial", "B", 7)
+        pdf.set_font("Arial", "B", 7.5)
         pdf.set_text_color(180, 190, 200)
         pdf.cell(36, 4, _tx(label), ln=True)
         pdf.set_x(8)
-        pdf.set_font("Arial", "", 8)
+        pdf.set_font("Arial", "", 8.2)
         pdf.set_text_color(255, 255, 255)
         pdf.multi_cell(36, 4, _tx(val))
-        y += 14
+        y += 15
 
     pdf.set_xy(8, 255)
     pdf.set_font("Arial", "B", 10)
@@ -375,9 +391,9 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
 
 
     # Mise en page des indicateurs
-    # 4 colonnes sur la largeur disponible à droite du bandeau latéral.
-    w = 33
-    gap = 3
+    # Les cartes sont légèrement plus larges et les espacements uniformes.
+    w = 35
+    gap = 2
     h_top = 31
     h_small = 27
 
@@ -388,12 +404,14 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         "Capacité\nrecommandée",
         f"{best.Cap_kWh:.0f} kWh",
         color=BLUE,
+        label_size=7.2,
     )
     _metric_box(
         pdf, x0 + (w + gap), y_top, w, h_top,
         "Puissance de\ncharge / décharge",
         f"{best.Power_kW:.0f} kW",
         color=BLUE,
+        label_size=7.0,
     )
     _metric_box(
         pdf, x0 + 2 * (w + gap), y_top, w, h_top,
@@ -408,10 +426,11 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"+{sim.surplus_captured:.0%}",
         "gain d'autoconsommation",
         color=ORANGE,
+        label_size=7.1,
     )
 
-    # Ligne 2 : imports et valorisation énergétique
-    y_import = 68
+    # Ligne 2 : imports et énergie valorisée
+    y_import = 67
     _metric_box(
         pdf, x0, y_import, w, h_small,
         "Import avant",
@@ -435,36 +454,35 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     )
 
     valorisation_energetique = import_avoided + export_avoided
-    # Grande carte à droite, sur la hauteur des deux lignes import/export.
+    energy_x = x0 + 3 * (w + gap)
+    energy_y = y_import
+    energy_h = 61
+
     pdf.set_draw_color(*GREEN)
     pdf.set_fill_color(*LIGHT_GREEN)
-    pdf.rect(x0 + 3 * (w + gap), y_import, w, 61, style="DF")
+    pdf.rect(energy_x, energy_y, w, energy_h, style="DF")
 
-    pdf.set_xy(x0 + 3 * (w + gap) + 4, y_import + 6)
+    pdf.set_xy(energy_x + 4, energy_y + 7)
     pdf.set_font("Arial", "B", 8)
     pdf.set_text_color(*GREEN)
     pdf.multi_cell(w - 8, 4, _tx("ÉNERGIE\nVALORISÉE"), align="C")
 
     pdf.set_draw_color(*GREEN)
-    pdf.line(
-        x0 + 3 * (w + gap) + 5,
-        y_import + 20,
-        x0 + 4 * (w + gap) - gap - 5,
-        y_import + 20,
-    )
+    pdf.line(energy_x + 5, energy_y + 21, energy_x + w - 5, energy_y + 21)
 
-    pdf.set_xy(x0 + 3 * (w + gap) + 4, y_import + 28)
-    pdf.set_font("Arial", "B", 14)
+    # Chiffre principal plus grand et centré verticalement.
+    pdf.set_xy(energy_x + 3, energy_y + 29)
+    pdf.set_font("Arial", "B", 16)
     pdf.set_text_color(*GREEN)
-    pdf.cell(w - 8, 8, _tx(f"{_kwh(valorisation_energetique)} kWh"), align="C")
+    pdf.cell(w - 6, 9, _tx(f"{_kwh(valorisation_energetique)} kWh"), align="C")
 
-    pdf.set_xy(x0 + 3 * (w + gap) + 4, y_import + 45)
-    pdf.set_font("Arial", "", 7)
+    pdf.set_xy(energy_x + 5, energy_y + 48)
+    pdf.set_font("Arial", "", 6.8)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(w - 8, 4, _tx("Import évité + export évité"), align="C")
+    pdf.multi_cell(w - 10, 4, _tx("Import évité + export évité"), align="C")
 
     # Ligne 3 : exports
-    y_export = 102
+    y_export = 101
     _metric_box(
         pdf, x0, y_export, w, h_small,
         "Export avant",
@@ -493,9 +511,9 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"les achats d'électricité de {_kwh(import_avoided)} kWh et les injections réseau "
         f"de {_kwh(export_avoided)} kWh."
     )
-    _info_box(pdf, x0, 141, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
+    _info_box(pdf, x0, 138, 144, 24, "CONCLUSION ENERGETIQUE", conclusion)
 
-    pdf.set_xy(x0, 188)
+    pdf.set_xy(x0, 174)
     pdf.set_font("Arial", "", 10)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(145, 4, _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."))
