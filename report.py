@@ -212,7 +212,7 @@ def _resolve_logo_path(logo_path: str | None = None) -> str | None:
     return None
 
 
-def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None):
+def _side_bar(pdf: FPDF, meta, tariff_profile: str, client_name: str = "", logo_path: str | None = None):
     pdf.set_fill_color(*DARK)
     pdf.rect(0, 0, 52, 297, style="F")
 
@@ -244,7 +244,7 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
     pdf.line(8, 84, 20, 84)
 
     infos = [
-        ("CLIENT", "A renseigner"),
+        ("CLIENT", client_name.strip() or "A renseigner"),
         ("GRD", tariff_profile),
         ("PÉRIODE", f"{getattr(meta, 'coverage_days', 0):.0f} jours"),
         ("PAS DE TEMPS", f"{getattr(meta, 'dt_hours', 0) * 60:.0f} min"),
@@ -428,9 +428,9 @@ def _plot_monthly_export(df, sim) -> BytesIO:
     buf.seek(0)
     return buf
 
-def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, logo_path=None):
+def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, client_name="", logo_path=None):
     pdf.add_page()
-    _side_bar(pdf, meta, tariff_profile, logo_path=logo_path)
+    _side_bar(pdf, meta, tariff_profile, client_name=client_name, logo_path=logo_path)
 
     x0 = 58
     pdf.set_xy(x0, 14)
@@ -697,12 +697,18 @@ def generate_battery_report(
     sections=None,
     swissolar=None,
     logo_path: str | None = None,
+    client_name: str = "",
 ) -> bytes:
     pdf = ReportPDF(orientation="P", unit="mm", format="A4")
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=12)
 
-    _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, logo_path=logo_path)
+    _page_1(
+        pdf, df, meta, best, big, sim, tariff_profile,
+        gain_share, gain_max_extra,
+        client_name=client_name,
+        logo_path=logo_path,
+    )
     _page_2(pdf, df, meta, rec, best, big, sim)
     _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export)
 

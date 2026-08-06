@@ -187,6 +187,14 @@ def T(key: str, **fmt) -> str:
 # them, and drop the uploaded files, on every language change.)
 st.sidebar.header(T("settings_header"))
 
+client_name = st.sidebar.text_input(
+    "Nom du client",
+    value="",
+    key="client_name",
+    placeholder="Ex. Jean Dupont",
+    help="Ce nom apparaîtra dans le bandeau noir du rapport PDF.",
+)
+
 # Marque batterie masquée pour l'instant.
 # Le moteur garde GoodWe comme référence interne pour les seuils techniques,
 # mais l'utilisateur ne voit plus le choix de marque ni les sources cycles.
@@ -1337,6 +1345,7 @@ pdf_bytes = generate_battery_report(
     cost_life=cost_life,
     sections=pdf_sections,
     swissolar=swissolar,
+    client_name=client_name,
 )
 
 st.download_button(
