@@ -374,25 +374,103 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     export_reduc = _safe_pct(export_avoided, sim.export_before)
 
 
-    # Main metrics
-    _metric_box(pdf, x0, 30, 43, 28, "Capacité", f"{best.Cap_kWh:.0f} kWh", color=BLUE)
-    _metric_box(pdf, x0 + 47, 30, 43, 28, "Puissance", f"{best.Power_kW:.0f} kW", color=BLUE)
-    _metric_box(pdf, x0 + 94, 30, 50, 28, "Énergie valorisée", f"{_kwh(import_avoided)} kWh", "Achats réseau evités", color=GREEN)
-
-    y = 67
-    w = 34
-    h = 26
+    # Mise en page des indicateurs
+    # 4 colonnes sur la largeur disponible à droite du bandeau latéral.
+    w = 33
     gap = 3
-    _metric_box(pdf, x0, y, w, h, "Import avant", f"{_kwh(sim.import_before)} kWh", "Depuis le réseau", color=BLUE)
-    _metric_box(pdf, x0 + (w + gap), y, w, h, "Import apres", f"{_kwh(import_after)} kWh", "Depuis le réseau", color=BLUE)
-    _metric_box(pdf, x0 + 2 * (w + gap), y, w, h, "Import evité", f"{_kwh(import_avoided)} kWh", f"-{import_reduc:.0f} %", color=GREEN)
-    _metric_box(pdf, x0 + 3 * (w + gap), y, w, h, "Export avant", f"{_kwh(sim.export_before)} kWh", "Vers le réseau", color=ORANGE)
+    h_top = 31
+    h_small = 27
 
-    y2 = 99
-    _metric_box(pdf, x0, y2, w, h, "Export apres", f"{_kwh(export_after)} kWh", "Vers le réseau", color=ORANGE)
-    _metric_box(pdf, x0 + (w + gap), y2, w, h, "Export evité", f"{_kwh(export_avoided)} kWh", f"-{export_reduc:.0f} %", color=GREEN)
-    _metric_box(pdf, x0 + 2 * (w + gap), y2, w, h, "Surplus capté", f"{sim.surplus_captured:.0%}", "du surplus solaire", color=ORANGE)
-    _metric_box(pdf, x0 + 3 * (w + gap), y2, w, h, "Cycles", f"{best.Cycles_per_year:.0f}/an", "equivalents", color=PURPLE)
+    # Ligne 1 : caractéristiques principales
+    y_top = 30
+    _metric_box(
+        pdf, x0, y_top, w, h_top,
+        "Capacité recommandée",
+        f"{best.Cap_kWh:.0f} kWh",
+        color=BLUE,
+    )
+    _metric_box(
+        pdf, x0 + (w + gap), y_top, w, h_top,
+        "Puissance de charge et décharge",
+        f"{best.Power_kW:.0f} kW",
+        color=BLUE,
+    )
+    _metric_box(
+        pdf, x0 + 2 * (w + gap), y_top, w, h_top,
+        "Cycles",
+        f"{best.Cycles_per_year:.0f}/an",
+        "équivalents",
+        color=PURPLE,
+    )
+    _metric_box(
+        pdf, x0 + 3 * (w + gap), y_top, w, h_top,
+        "Autoconsommation",
+        f"+{sim.surplus_captured:.0%}",
+        "du surplus solaire",
+        color=ORANGE,
+    )
+
+    # Ligne 2 : imports et valorisation énergétique
+    y_import = 68
+    _metric_box(
+        pdf, x0, y_import, w, h_small,
+        "Import avant",
+        f"{_kwh(sim.import_before)} kWh",
+        "Depuis le réseau",
+        color=BLUE,
+    )
+    _metric_box(
+        pdf, x0 + (w + gap), y_import, w, h_small,
+        "Import après",
+        f"{_kwh(import_after)} kWh",
+        "Depuis le réseau",
+        color=BLUE,
+    )
+    _metric_box(
+        pdf, x0 + 2 * (w + gap), y_import, w, h_small,
+        "Import évité",
+        f"{_kwh(import_avoided)} kWh",
+        f"-{import_reduc:.0f} %",
+        color=GREEN,
+    )
+
+    valorisation_energetique = import_avoided + export_avoided
+    _info_box(
+        pdf,
+        x0 + 3 * (w + gap),
+        y_import,
+        w,
+        61,
+        "VALORISATION ÉNERGÉTIQUE",
+        f"{_kwh(valorisation_energetique)} kWh\n\n"
+        "(Import évité + export évité)",
+        fill=LIGHT_GREEN,
+        border=GREEN,
+    )
+
+    # Ligne 3 : exports
+    y_export = 102
+    _metric_box(
+        pdf, x0, y_export, w, h_small,
+        "Export avant",
+        f"{_kwh(sim.export_before)} kWh",
+        "Vers le réseau",
+        color=ORANGE,
+    )
+    _metric_box(
+        pdf, x0 + (w + gap), y_export, w, h_small,
+        "Export après",
+        f"{_kwh(export_after)} kWh",
+        "Vers le réseau",
+        color=ORANGE,
+    )
+    _metric_box(
+        pdf, x0 + 2 * (w + gap), y_export, w, h_small,
+        "Export évité",
+        f"{_kwh(export_avoided)} kWh",
+        f"-{export_reduc:.0f} %",
+        color=GREEN,
+    )
 
     conclusion = (
         f"Une batterie de {best.Cap_kWh:.0f} kWh permet de stocker {_kwh(export_avoided)} kWh/an de surplus solaire "
@@ -400,9 +478,9 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"Cette capacité represente un bon compromis entre énergie valorisée et capacité installée. "
         f"Les hypotheses techniques sont indiquées dans l'analyse detaillée."
     )
-    _info_box(pdf, x0, 137, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
+    _info_box(pdf, x0, 141, 144, 34, "CONCLUSION ENERGETIQUE", conclusion)
 
-    pdf.set_xy(x0, 184)
+    pdf.set_xy(x0, 188)
     pdf.set_font("Arial", "", 10)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(145, 4, _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."))
