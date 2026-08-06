@@ -216,9 +216,14 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, logo_path: str | None = None
         y += 15
 
     pdf.set_xy(8, 255)
-    pdf.set_font("Arial", "B", 10)
+    pdf.set_font("Arial", "B", 9)
     pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.multi_cell(36, 4, _tx("L'énergie d'aujourd'hui,\noptimisée pour demain."))
+    pdf.multi_cell(
+        36,
+        4,
+        _tx("L'énergie d'aujourd'hui,\noptimisée\npour demain."),
+        align="L",
+    )
 
 
 def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
@@ -408,10 +413,10 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     )
     _metric_box(
         pdf, x0 + (w + gap), y_top, w, h_top,
-        "Puissance de\ncharge / décharge",
+        "Puissance de charge\net décharge",
         f"{best.Power_kW:.0f} kW",
         color=BLUE,
-        label_size=7.0,
+        label_size=6.2,
     )
     _metric_box(
         pdf, x0 + 2 * (w + gap), y_top, w, h_top,
@@ -426,7 +431,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"+{sim.surplus_captured:.0%}",
         "gain d'autoconsommation",
         color=ORANGE,
-        label_size=7.1,
+        label_size=5.8,
     )
 
     # Ligne 2 : imports et énergie valorisée
@@ -476,7 +481,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     pdf.set_text_color(*GREEN)
     pdf.cell(w - 6, 9, _tx(f"{_kwh(valorisation_energetique)} kWh"), align="C")
 
-    pdf.set_xy(energy_x + 5, energy_y + 48)
+    pdf.set_xy(energy_x + 5, energy_y + 44)
     pdf.set_font("Arial", "", 6.8)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(w - 10, 4, _tx("Import évité + export évité"), align="C")
