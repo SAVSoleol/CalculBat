@@ -189,6 +189,179 @@ def _info_box(pdf: FPDF, x: float, y: float, w: float, h: float, title: str, tex
     pdf.multi_cell(w - 10, 4, _tx(text))
 
 
+def _draw_arrow(pdf: FPDF, x1: float, y: float, x2: float, color, dashed: bool = False):
+    """Simple horizontal arrow."""
+    pdf.set_draw_color(*color)
+    if dashed:
+        step = 3.0
+        x = x1
+        while x < x2 - 2:
+            pdf.line(x, y, min(x + 1.8, x2 - 2), y)
+            x += step
+    else:
+        pdf.line(x1, y, x2 - 2, y)
+
+    pdf.line(x2 - 5, y - 2, x2 - 2, y)
+    pdf.line(x2 - 5, y + 2, x2 - 2, y)
+
+
+def _draw_sun(pdf: FPDF, cx: float, cy: float, r: float = 3.0):
+    pdf.set_draw_color(*ORANGE)
+    pdf.ellipse(cx - r, cy - r, 2 * r, 2 * r)
+    rays = [
+        (0, -1), (0.7, -0.7), (1, 0), (0.7, 0.7),
+        (0, 1), (-0.7, 0.7), (-1, 0), (-0.7, -0.7),
+    ]
+    for dx, dy in rays:
+        pdf.line(
+            cx + dx * (r + 1.2), cy + dy * (r + 1.2),
+            cx + dx * (r + 3.2), cy + dy * (r + 3.2),
+        )
+
+
+def _draw_panel(pdf: FPDF, x: float, y: float, w: float = 13, h: float = 8):
+    pdf.set_draw_color(*ORANGE)
+    pdf.rect(x, y, w, h)
+    pdf.line(x + w / 3, y, x + w / 3, y + h)
+    pdf.line(x + 2 * w / 3, y, x + 2 * w / 3, y + h)
+    pdf.line(x, y + h / 2, x + w, y + h / 2)
+    pdf.line(x + w / 2, y + h, x + w / 2, y + h + 3)
+    pdf.line(x + w / 2 - 3, y + h + 3, x + w / 2 + 3, y + h + 3)
+
+
+def _draw_house(pdf: FPDF, x: float, y: float, w: float = 13, h: float = 11):
+    pdf.set_draw_color(*TEXT)
+    roof_y = y + 4
+    pdf.line(x, roof_y, x + w / 2, y)
+    pdf.line(x + w / 2, y, x + w, roof_y)
+    pdf.rect(x + 1.5, roof_y, w - 3, h - 4)
+    pdf.rect(x + 4.8, y + 7.2, 3.2, 3.8)
+    pdf.rect(x + 8.9, y + 6.2, 2.1, 2.1)
+
+
+def _draw_battery(pdf: FPDF, x: float, y: float, w: float = 8, h: float = 14):
+    pdf.set_draw_color(*GREEN)
+    pdf.rect(x, y + 1.5, w, h - 1.5)
+    pdf.rect(x + 2.3, y, w - 4.6, 1.5)
+    for i in range(3):
+        yy = y + 4 + i * 3
+        pdf.set_fill_color(*GREEN)
+        pdf.rect(x + 1.5, yy, w - 3, 1.8, style="F")
+
+
+def _draw_grid(pdf: FPDF, x: float, y: float, w: float = 11, h: float = 16):
+    pdf.set_draw_color(76, 60, 170)
+    cx = x + w / 2
+    pdf.line(cx, y, x + 1, y + h)
+    pdf.line(cx, y, x + w - 1, y + h)
+    pdf.line(x + 1, y + h, x + w - 1, y + h)
+    pdf.line(x + 2, y + 5, x + w - 2, y + 5)
+    pdf.line(x + 0.5, y + 9, x + w - 0.5, y + 9)
+    pdf.line(x + 2.2, y + 13, x + w - 2.2, y + 13)
+    pdf.line(x + 2, y + 5, x + w - 2, y + 9)
+    pdf.line(x + w - 2, y + 5, x + 2, y + 9)
+    pdf.line(x + 0.5, y + 9, x + w - 2.2, y + 13)
+    pdf.line(x + w - 0.5, y + 9, x + 2.2, y + 13)
+
+
+def _battery_flow_diagram(pdf: FPDF, x: float, y: float, w: float, h: float):
+    """Vector diagram for the free space on page 1."""
+    pdf.set_draw_color(*BORDER)
+    pdf.set_fill_color(255, 255, 255)
+    pdf.rect(x, y, w, h, style="DF")
+
+    pdf.set_xy(x + 5, y + 4)
+    pdf.set_font("Arial", "B", 9)
+    pdf.set_text_color(*SOLEOL_ORANGE)
+    pdf.cell(w - 10, 5, _tx("FONCTIONNEMENT AVEC BATTERIE"))
+
+    pdf.set_xy(x + 5, y + 10)
+    pdf.set_font("Arial", "", 6.6)
+    pdf.set_text_color(*MUTED)
+    pdf.cell(
+        w - 10,
+        4,
+        _tx("Le surplus solaire est stocké pour être utilisé lorsque la production ne suffit plus."),
+    )
+
+    # 5 étapes régulièrement espacées
+    centers = [x + 13, x + 42, x + 71, x + 100, x + 129]
+    icon_y = y + 24
+
+    _draw_sun(pdf, centers[0], icon_y - 4, 2.3)
+    _draw_panel(pdf, centers[0] - 6.5, icon_y, 13, 7.5)
+
+    _draw_house(pdf, centers[1] - 6.5, icon_y - 1, 13, 11)
+
+    _draw_battery(pdf, centers[2] - 4, icon_y - 2, 8, 14)
+
+    _draw_house(pdf, centers[3] - 6.5, icon_y - 1, 13, 11)
+    # Petit croissant / indication soirée
+    pdf.set_draw_color(*GREEN)
+    pdf.ellipse(centers[3] + 5.2, icon_y - 4.5, 3.5, 3.5)
+    pdf.set_fill_color(255, 255, 255)
+    pdf.ellipse(centers[3] + 6.0, icon_y - 5.0, 3.5, 3.5, style="F")
+
+    _draw_grid(pdf, centers[4] - 5.5, icon_y - 3.5, 11, 15)
+
+    # Flèches entre étapes
+    arrow_y = icon_y + 4
+    _draw_arrow(pdf, centers[0] + 8, arrow_y, centers[1] - 8, ORANGE)
+    _draw_arrow(pdf, centers[1] + 8, arrow_y, centers[2] - 7, GREEN)
+    _draw_arrow(pdf, centers[2] + 7, arrow_y, centers[3] - 8, GREEN, dashed=True)
+    _draw_arrow(pdf, centers[3] + 8, arrow_y, centers[4] - 7, (76, 60, 170), dashed=True)
+
+    # Titres des étapes
+    labels = [
+        ("1. Production solaire", ORANGE),
+        ("2. Priorité maison", ORANGE),
+        ("3. Charge batterie", GREEN),
+        ("4. Restitution", GREEN),
+        ("5. Réseau", (76, 60, 170)),
+    ]
+    descriptions = [
+        "Production en journée",
+        "Le solaire alimente le site",
+        "Le surplus est stocké",
+        "La batterie prend le relais",
+        "Appoint ou surplus",
+    ]
+
+    for cx, (label, color), desc in zip(centers, labels, descriptions):
+        pdf.set_xy(cx - 13, y + 42)
+        pdf.set_font("Arial", "B", 5.8)
+        pdf.set_text_color(*color)
+        pdf.multi_cell(26, 3.1, _tx(label), align="C")
+
+        pdf.set_xy(cx - 13, y + 49)
+        pdf.set_font("Arial", "", 5.4)
+        pdf.set_text_color(*TEXT)
+        pdf.multi_cell(26, 3.0, _tx(desc), align="C")
+
+    # Bandeau objectif
+    band_y = y + h - 12
+    pdf.set_draw_color(*BORDER)
+    pdf.set_fill_color(*LIGHT_BG)
+    pdf.rect(x + 5, band_y, w - 10, 8, style="DF")
+
+    pdf.set_xy(x + 8, band_y + 1.3)
+    pdf.set_font("Arial", "B", 6.2)
+    pdf.set_text_color(*SOLEOL_ORANGE)
+    pdf.cell(19, 5, _tx("OBJECTIF"))
+
+    pdf.set_draw_color(*BORDER)
+    pdf.line(x + 27, band_y + 1.5, x + 27, band_y + 6.5)
+
+    pdf.set_xy(x + 30, band_y + 1.3)
+    pdf.set_font("Arial", "", 5.8)
+    pdf.set_text_color(*TEXT)
+    pdf.cell(
+        w - 38,
+        5,
+        _tx("Maximiser l'utilisation de votre énergie solaire et réduire les échanges avec le réseau."),
+    )
+
+
 def _resolve_logo_path(logo_path: str | None = None) -> str | None:
     """Return the first existing Soleol logo path, if available."""
     from pathlib import Path
@@ -481,11 +654,11 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     )
     _metric_box(
         pdf, x0 + 3 * (w + gap), y_top, w, h_top,
-        "Surplus capté",
+        "Autoconsommation",
         f"+{sim.surplus_captured:.0%}",
         "",
         color=ORANGE,
-        label_size=7,
+        label_size=6,
         value_size=14,
     )
 
@@ -582,6 +755,11 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     pdf.set_font("Arial", "", 10)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(145, 4, _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."))
+
+
+    # Schéma vectoriel ajouté dans l'espace libre de la page 1.
+    # Il est volontairement indépendant des données afin de garder un rendu stable.
+    _battery_flow_diagram(pdf, x0, 190, 144, 68)
 
 
 def _page_2(pdf, df, meta, rec, best, big, sim):
