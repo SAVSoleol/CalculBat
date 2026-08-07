@@ -9,6 +9,7 @@ Creates a clean 3-page A4 report:
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 
 import matplotlib
 
@@ -757,9 +758,22 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     pdf.multi_cell(145, 4, _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."))
 
 
-    # Schéma vectoriel ajouté dans l'espace libre de la page 1.
-    # Il est volontairement indépendant des données afin de garder un rendu stable.
-    _battery_flow_diagram(pdf, x0, 190, 144, 68)
+    # Schéma de fonctionnement sous forme d'image.
+    # Placer le fichier Schema.png (ou Schema.jpg / Schema.jpeg) à côté de report.py.
+    schema_candidates = [
+        "Schema.png",
+        "Schema.jpg",
+        "Schema.jpeg",
+        "schema.png",
+        "schema.jpg",
+        "schema.jpeg",
+    ]
+    schema_path = next((p for p in schema_candidates if Path(p).is_file()), None)
+
+    if schema_path:
+        # L'image générée est au format horizontal ~1.95:1.
+        # Largeur identique aux blocs de la page 1, hauteur conservant ses proportions.
+        pdf.image(schema_path, x=x0, y=187, w=144)
 
 
 def _page_2(pdf, df, meta, rec, best, big, sim):
