@@ -421,8 +421,6 @@ def _side_bar(pdf: FPDF, meta, tariff_profile: str, client_name: str = "", logo_
         ("CLIENT", client_name.strip() or "A renseigner"),
         ("GRD", tariff_profile),
         ("PÉRIODE", f"{getattr(meta, 'coverage_days', 0):.0f} jours"),
-        ("PAS DE TEMPS", f"{getattr(meta, 'dt_hours', 0) * 60:.0f} min"),
-        ("SOURCE", getattr(meta, "vendor", "")),
     ]
 
     y = 92
