@@ -70,10 +70,17 @@ st.markdown(
         gap: 14px;
         margin-bottom: 14px;
     }
-    .mar-card-grid-6 {
+    .mar-card-grid-3 {
         display: grid;
-        grid-template-columns: repeat(6, minmax(130px, 1fr));
+        grid-template-columns: repeat(3, minmax(220px, 1fr));
         gap: 12px;
+        margin-bottom: 14px;
+    }
+    .mar-card-grid-1of3 {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(220px, 1fr));
+        gap: 12px;
+        margin-top: -2px;
         margin-bottom: 14px;
     }
     .mar-card {
@@ -151,7 +158,7 @@ st.markdown(
         margin-top: 8px;
     }
     @media (max-width: 1100px) {
-        .mar-card-grid-5, .mar-card-grid-6 {
+        .mar-card-grid-5, .mar-card-grid-3, .mar-card-grid-1of3 {
             grid-template-columns: repeat(2, minmax(160px, 1fr));
         }
         .mar-autoconso-grid {
@@ -803,6 +810,15 @@ export_before_total = float(sim.export_before)
 export_after_total = float(sim.export_after_total)
 export_avoided_total = float(sim.export_stored)
 
+# Surplus moyen journalier sur la période analysée.
+# Les données internes sont déjà normalisées en kWh par intervalle.
+coverage_days_for_average = float(getattr(meta, "coverage_days", 0.0) or 0.0)
+surplus_average_kwh_per_day = (
+    export_before_total / coverage_days_for_average
+    if coverage_days_for_average > 0
+    else 0.0
+)
+
 import_reduction_pct = (import_avoided_total / import_before_total * 100) if import_before_total > 0 else 0.0
 export_reduction_pct = (export_avoided_total / export_before_total * 100) if export_before_total > 0 else 0.0
 
@@ -860,7 +876,7 @@ st.markdown(
 
 st.markdown(
     f"""
-    <div class="mar-card-grid-6">
+    <div class="mar-card-grid-3">
         <div class="mar-card small">
             <div class="mar-label"><span class="mar-icon">🔌</span>Import avant</div>
             <div class="mar-value small mar-blue">{_fmt_kwh(import_before_total)} kWh</div>
@@ -876,6 +892,9 @@ st.markdown(
             <div class="mar-value small mar-green">{_fmt_kwh(import_avoided_total)} kWh</div>
             <div class="mar-sub">-{import_reduction_pct:.0f} %</div>
         </div>
+    </div>
+
+    <div class="mar-card-grid-3">
         <div class="mar-card small">
             <div class="mar-label"><span class="mar-icon">🔆</span>Export avant</div>
             <div class="mar-value small mar-orange">{_fmt_kwh(export_before_total)} kWh</div>
@@ -890,6 +909,14 @@ st.markdown(
             <div class="mar-label"><span class="mar-icon">⬇️</span>Export évité</div>
             <div class="mar-value small mar-green">{_fmt_kwh(export_avoided_total)} kWh</div>
             <div class="mar-sub">-{export_reduction_pct:.0f} %</div>
+        </div>
+    </div>
+
+    <div class="mar-card-grid-1of3">
+        <div class="mar-card small">
+            <div class="mar-label"><span class="mar-icon">📊</span>Surplus moyen</div>
+            <div class="mar-value small mar-purple">{_fmt_kwh(surplus_average_kwh_per_day)} kWh/jour</div>
+            <div class="mar-sub">Moyenne réinjectée sur la période analysée</div>
         </div>
     </div>
     """,
