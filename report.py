@@ -471,7 +471,7 @@ def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
         zorder=3,
         color="#1565C0",
     )
-    ax.set_title("Énergie valorisée selon la capacité batterie", fontsize=11, weight="bold")
+    ax.set_title("Énergie achetée évité", fontsize=12, weight="bold")
     ax.set_xlabel("Capacité batterie (kWh)", fontsize=9, labelpad=8)
     ax.set_ylabel("Import evité (kWh/an)", fontsize=9)
     ax.grid(alpha=0.22)
