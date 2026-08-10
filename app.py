@@ -298,8 +298,8 @@ if single_tariff:
     tariff_import_unique = st.sidebar.number_input(
         "Tarif achat unique (CHF/kWh)",
         value=float(profile["ht"]),
-        step=0.01,
-        format="%.2f",
+        step=0.001,
+        format="%.4f",
         key=f"tariff_import_unique_{tariff_profile}",
         disabled=not manual_tariffs,
         help="Tarif d'achat identique toute l'année, 24h/24.",
@@ -310,8 +310,8 @@ else:
     tariff_import_ht = st.sidebar.number_input(
         "Tarif achat haut tarif (CHF/kWh)",
         value=float(profile["ht"]),
-        step=0.01,
-        format="%.2f",
+        step=0.001,
+        format="%.4f",
         key=f"tariff_import_ht_{tariff_profile}",
         disabled=not manual_tariffs,
     )
@@ -319,8 +319,8 @@ else:
     tariff_import_bt = st.sidebar.number_input(
         "Tarif achat bas tarif (CHF/kWh)",
         value=float(profile["bt"]),
-        step=0.01,
-        format="%.2f",
+        step=0.001,
+        format="%.4f",
         key=f"tariff_import_bt_{tariff_profile}",
         disabled=not manual_tariffs,
     )
@@ -328,8 +328,8 @@ else:
 tariff_export = st.sidebar.number_input(
     "Tarif rachat / revente (CHF/kWh)",
     value=float(profile["export"]),
-    step=0.01,
-    format="%.2f",
+    step=0.001,
+    format="%.4f",
     key=f"tariff_export_{tariff_profile}",
     disabled=not manual_tariffs,
 )
@@ -1048,9 +1048,9 @@ with st.expander("Détail du gain tarifaire", expanded=False):
     )
     st.dataframe(tariff_detail, use_container_width=True, hide_index=True)
     st.caption(
-        f"Formule : gain = import évité HT × {tariff_import_ht:.2f} "
-        f"+ import évité BT × {tariff_import_bt:.2f} "
-        f"- surplus stocké × {tariff_export:.2f}. "
+        f"Formule : gain = import évité HT × {tariff_import_ht:.4f} "
+        f"+ import évité BT × {tariff_import_bt:.4f} "
+        f"- surplus stocké × {tariff_export:.4f}. "
         f"Profil utilisé : {tariff_profile}."
     )
 

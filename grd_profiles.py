@@ -32,17 +32,19 @@ GRD_PROFILES = {
         ),
     },
     "Groupe E": {
-        "ht": 0.31,
-        "bt": 0.21,
-        "export": 0.08,
+        "ht": 0.2932,
+        "bt": 0.1927,
+        "export": 0.0600,
         "periods": ((7.0, 12.0), (17.0, 23.0)),
         "weekend_low": False,
         "needs_verification": False,
-        "source": "Contrat utilisateur / valeurs renseignées manuellement",
+        "source": "Groupe E 2026 - PLUS tarif double, selon facture client",
         "description": (
-            "HT : 07h-12h et 17h-23h. "
-            "BT : 00h-07h, 12h-17h, 23h-00h. "
-            "Week-end : mêmes plages sauf contrat particulier."
+            "Tarifs variables 2026 utilisés par défaut. "
+            "HT : 07h-12h et 17h-23h à 0.2932 CHF/kWh. "
+            "BT : 00h-07h, 12h-17h, 23h-00h à 0.1927 CHF/kWh. "
+            "Reprise PV : 0.0600 CHF/kWh. "
+            "Les coûts fixes ne sont pas inclus dans le gain batterie."
         ),
     },
     "Romande Energie": {
