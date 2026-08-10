@@ -3,6 +3,7 @@
 Supported inputs:
 - Huawei Excel cumulative active energy exports
 - Groupe E Excel / CSV
+- Fronius Solar.web Excel (interval energy in Wh)
 - SolarEdge CSV
 - Romande Energie CSV
 - Generic Excel / CSV with Date + Import + Export columns
@@ -104,6 +105,7 @@ def _infer_dt_hours(ts: pd.Series) -> float:
 DEFAULT_UNITS = {
     "huawei": "kWh",
     "groupe_e_xlsx": "kW",
+    "fronius_xlsx": "Wh",
     "solaredge_csv": "Wh",
     "groupe_e_csv": "Wh",
     "romande_energie_csv": "kWh",
@@ -302,6 +304,17 @@ def detect_vendor(path: str | Path) -> str:
         if "soutirage" in blob and "surplus" in blob:
             return "groupe_e_xlsx"
 
+        # Fronius Solar.web Excel export.
+        # Typical French headers:
+        # - Date et heure
+        # - Énergie provenant du réseau
+        # - Énergie injectée dans le réseau
+        if (
+            "energie provenant du reseau" in blob
+            and "energie injectee dans le reseau" in blob
+        ):
+            return "fronius_xlsx"
+
         # Generic Excel fallback: Date + Import + Export columns.
         if _find_generic_excel_header_row(path) is not None:
             return "generic_excel"
@@ -379,6 +392,55 @@ def _load_huawei(path: Path) -> pd.DataFrame:
         ["timestamp", "import_kWh", "export_kWh"]
     ]
 
+
+
+def _load_fronius_xlsx(path: Path) -> pd.DataFrame:
+    """Load a Fronius Solar.web Excel export.
+
+    Fronius interval-energy exports commonly contain one header row followed by
+    a unit row ([Wh]). Values are interval energies, not powers, so the default
+    unit is Wh and _finalize() converts them directly to kWh by /1000.
+    """
+    # Search the first rows so the loader remains robust if Fronius adds a title
+    # or metadata row before the actual column headers.
+    preview = pd.read_excel(path, header=None, nrows=20)
+    header_row = None
+    for i in range(len(preview)):
+        row_blob = " | ".join(_norm(v) for v in preview.iloc[i].tolist())
+        if (
+            ("date et heure" in row_blob or ("date" in row_blob and "heure" in row_blob))
+            and "energie provenant du reseau" in row_blob
+            and "energie injectee dans le reseau" in row_blob
+        ):
+            header_row = i
+            break
+
+    if header_row is None:
+        raise UnsupportedFormatError(f"Fronius header row not found in {path.name}")
+
+    df = pd.read_excel(path, header=header_row)
+
+    date_col = (
+        _find_col(df.columns, "date", "heure")
+        or _find_col(df.columns, "date")
+        or _find_col(df.columns, "heure")
+    )
+    imp_col = _find_col(df.columns, "energie", "provenant", "reseau")
+    exp_col = _find_col(df.columns, "energie", "injectee", "reseau")
+
+    if not (date_col and imp_col and exp_col):
+        raise UnsupportedFormatError(f"Fronius columns not found in {path.name}")
+
+    # The row immediately below the headers can contain unit labels such as
+    # [Wh]. pd.to_numeric(..., errors="coerce") turns those cells into NaN and
+    # _finalize() safely replaces them with 0 after invalid timestamps are removed.
+    return pd.DataFrame(
+        {
+            "timestamp": _parse_datetime(df[date_col], dayfirst=True),
+            "import_kWh": pd.to_numeric(df[imp_col], errors="coerce"),
+            "export_kWh": pd.to_numeric(df[exp_col], errors="coerce"),
+        }
+    )
 
 def _load_groupe_e_xlsx(path: Path) -> pd.DataFrame:
     head = pd.read_excel(path, header=None, nrows=15)
@@ -527,6 +589,7 @@ def _default_unit_for_loaded_file(vendor: str, raw_df: pd.DataFrame | None = Non
 _LOADERS = {
     "huawei": _load_huawei,
     "groupe_e_xlsx": _load_groupe_e_xlsx,
+    "fronius_xlsx": _load_fronius_xlsx,
     "solaredge_csv": _load_solaredge_csv,
     "groupe_e_csv": _load_groupe_e_csv,
     "romande_energie_csv": _load_romande_energie_csv,
