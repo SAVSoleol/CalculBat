@@ -481,14 +481,69 @@ def _load_groupe_e_xlsx(path: Path) -> pd.DataFrame:
 
 
 def _load_solaredge_csv(path: Path) -> pd.DataFrame:
+    """Load a SolarEdge CSV export.
+
+    SolarEdge commonly uses column names such as:
+    - Compteur d'importation/exportation- Import - Énergie (Wh)
+    - Compteur d'importation/exportation- Export - Énergie (Wh)
+
+    Because both headers contain the words "import" and "export" inside
+    "importation/exportation", a simple token search can select the wrong column.
+    We therefore identify the actual Import / Export segment explicitly.
+    """
     df = pd.read_csv(path, sep=",", encoding="utf-8-sig")
 
     date_col = _find_col(df.columns, "time") or _find_col(df.columns, "date")
-    imp_col = _find_col(df.columns, "import")
-    exp_col = _find_col(df.columns, "export")
+
+    imp_col = next(
+        (
+            c
+            for c in df.columns
+            if "- import -" in _norm(c)
+        ),
+        None,
+    )
+
+    exp_col = next(
+        (
+            c
+            for c in df.columns
+            if "- export -" in _norm(c)
+        ),
+        None,
+    )
+
+    # Fallback for SolarEdge exports whose headers use slightly different
+    # punctuation/spacing while still clearly separating Import and Export.
+    if imp_col is None:
+        imp_col = next(
+            (
+                c
+                for c in df.columns
+                if " import " in f" {_norm(c)} "
+                and "energie" in _norm(c)
+            ),
+            None,
+        )
+
+    if exp_col is None:
+        exp_col = next(
+            (
+                c
+                for c in df.columns
+                if " export " in f" {_norm(c)} "
+                and "energie" in _norm(c)
+            ),
+            None,
+        )
 
     if not (date_col and imp_col and exp_col):
         raise UnsupportedFormatError(f"SolarEdge columns not found in {path.name}")
+
+    if imp_col == exp_col:
+        raise UnsupportedFormatError(
+            f"SolarEdge import/export columns are ambiguous in {path.name}"
+        )
 
     ts = _parse_datetime(df[date_col], dayfirst=True)
 
