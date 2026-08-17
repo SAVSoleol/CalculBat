@@ -254,12 +254,6 @@ def recommend(
         )
         reason = "no_savings"
         warnings.append(("no_savings", {}))
-    elif mode in {"ci", "c&i", "industrie", "industrial", "c_i"}:
-        best = _ci_pick(frontier_raw, gain_max, min_cycles, ci_gain_share)
-        diagnostics, marginal_floor = _marginal_diagnostics(
-            frontier_raw, mode, marginal_gain_floor_chf_per_kwh
-        )
-        reason = "ci_saturation"
     else:
         best, diagnostics, marginal_floor, reason = _marginal_pick(
             frontier_raw,
@@ -270,8 +264,7 @@ def recommend(
 
     selected_cap = float(best["Cap_kWh"])
     rec_min = rec_max = selected_cap
-    if mode not in {"ci", "c&i", "industrie", "industrial", "c_i"}:
-        rec_min, rec_max = _offer_range(diagnostics, selected_cap, min_cycles, marginal_floor)
+    rec_min, rec_max = _offer_range(diagnostics, selected_cap, min_cycles, marginal_floor)
 
     row_idx = diagnostics.index[np.isclose(diagnostics["Cap_kWh"], selected_cap)].tolist()
     selected_marginal = None
