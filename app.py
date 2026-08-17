@@ -1381,6 +1381,7 @@ pdf_bytes = generate_battery_report(
     tariff_export=tariff_export,
     gain_share=gain_share,
     gain_max_extra=gain_max_extra,
+    study_mode=study_mode,
     cost_life=cost_life,
     sections=pdf_sections,
     swissolar=swissolar,

@@ -190,6 +190,102 @@ def _info_box(pdf: FPDF, x: float, y: float, w: float, h: float, title: str, tex
     pdf.multi_cell(w - 10, 4, _tx(text))
 
 
+def _financial_box(
+    pdf: FPDF,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    sim,
+    tariff_import_ht: float,
+    tariff_import_bt: float,
+    tariff_export: float,
+):
+    """Financial summary displayed only for C&I studies."""
+    gain_ht = float(getattr(sim, "gain_ht_chf", 0.0) or 0.0)
+    gain_bt = float(getattr(sim, "gain_bt_chf", 0.0) or 0.0)
+    export_lost = float(getattr(sim, "export_value_lost_chf", 0.0) or 0.0)
+    net_gain = float(getattr(sim, "gain_chf", gain_ht + gain_bt - export_lost) or 0.0)
+
+    avoided_ht = float(getattr(sim, "import_avoided_ht", 0.0) or 0.0)
+    avoided_bt = float(getattr(sim, "import_avoided_bt", 0.0) or 0.0)
+    export_stored = float(getattr(sim, "export_stored", 0.0) or 0.0)
+
+    pdf.set_draw_color(*GREEN)
+    pdf.set_fill_color(*LIGHT_GREEN)
+    pdf.rect(x, y, w, h, style="DF")
+
+    pdf.set_xy(x + 5, y + 4)
+    pdf.set_font("Arial", "B", 9)
+    pdf.set_text_color(*GREEN)
+    pdf.cell(w - 10, 5, _tx("ÉCONOMIE FINANCIÈRE"))
+
+    # Partie gauche : détail du calcul.
+    detail_w = 88
+    pdf.set_draw_color(*BORDER)
+    pdf.line(x + detail_w + 4, y + 9, x + detail_w + 4, y + h - 5)
+
+    same_import_tariff = abs(float(tariff_import_ht) - float(tariff_import_bt)) < 1e-9
+    if same_import_tariff:
+        rows = [
+            (
+                "Achat réseau évité",
+                avoided_ht + avoided_bt,
+                float(tariff_import_ht),
+                gain_ht + gain_bt,
+            ),
+            (
+                "Revente non perçue",
+                export_stored,
+                float(tariff_export),
+                -export_lost,
+            ),
+        ]
+        row_y = [y + 13, y + 23]
+    else:
+        rows = [
+            ("Import évité HT", avoided_ht, float(tariff_import_ht), gain_ht),
+            ("Import évité BT", avoided_bt, float(tariff_import_bt), gain_bt),
+            ("Revente non perçue", export_stored, float(tariff_export), -export_lost),
+        ]
+        row_y = [y + 12, y + 20, y + 28]
+
+    for yy, (label, energy, tariff, value) in zip(row_y, rows):
+        pdf.set_xy(x + 5, yy)
+        pdf.set_font("Arial", "B", 6.4)
+        pdf.set_text_color(*TEXT)
+        pdf.cell(31, 4, _tx(label))
+
+        pdf.set_xy(x + 36, yy)
+        pdf.set_font("Arial", "", 6.2)
+        pdf.set_text_color(*MUTED)
+        pdf.cell(27, 4, _tx(f"{_kwh(energy)} kWh x {tariff:.3f}"), align="R")
+
+        pdf.set_xy(x + 65, yy)
+        pdf.set_font("Arial", "B", 6.5)
+        pdf.set_text_color(*(GREEN if value >= 0 else ORANGE))
+        sign = "-" if value < 0 else ""
+        pdf.cell(24, 4, _tx(f"{sign}{_chf(abs(value))} CHF"), align="R")
+
+    # Partie droite : économie nette annuelle mise en évidence.
+    net_x = x + detail_w + 8
+    net_w = w - detail_w - 13
+    pdf.set_xy(net_x, y + 10)
+    pdf.set_font("Arial", "B", 6.8)
+    pdf.set_text_color(*MUTED)
+    pdf.multi_cell(net_w, 3.5, _tx("ÉCONOMIE NETTE\nANNUELLE"), align="C")
+
+    pdf.set_xy(net_x, y + 20)
+    pdf.set_font("Arial", "B", 17)
+    pdf.set_text_color(*GREEN)
+    pdf.cell(net_w, 8, _tx(_chf(net_gain)), align="C")
+
+    pdf.set_xy(net_x, y + 28)
+    pdf.set_font("Arial", "B", 8)
+    pdf.set_text_color(*GREEN)
+    pdf.cell(net_w, 5, "CHF/an", align="C")
+
+
 def _draw_arrow(pdf: FPDF, x1: float, y: float, x2: float, color, dashed: bool = False):
     """Simple horizontal arrow."""
     pdf.set_draw_color(*color)
@@ -600,7 +696,11 @@ def _plot_monthly_export(df, sim) -> BytesIO:
     buf.seek(0)
     return buf
 
-def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra, client_name="", logo_path=None):
+def _page_1(
+    pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra,
+    tariff_import_ht, tariff_import_bt, tariff_export, study_mode="residential",
+    client_name="", logo_path=None,
+):
     pdf.add_page()
     _side_bar(pdf, meta, tariff_profile, client_name=client_name, logo_path=logo_path)
 
@@ -657,7 +757,7 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"+{sim.surplus_captured:.0%}",
         "",
         color=ORANGE,
-        label_size=7,
+        label_size=6,
         value_size=14,
     )
 
@@ -748,12 +848,42 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
         f"les achats d'électricité de {_kwh(import_avoided)} kWh et les injections réseau "
         f"de {_kwh(export_avoided)} kWh."
     )
-    _info_box(pdf, x0, 138, 144, 22, "CONCLUSION", conclusion, fill=(255, 251, 249), border=SOLEOL_ORANGE)
 
-    pdf.set_xy(x0, 170)
-    pdf.set_font("Arial", "", 10)
+    is_ci = str(study_mode).lower() == "ci"
+
+    if is_ci:
+        # Bloc financier affiché uniquement pour les études C&I / Industrie.
+        _financial_box(
+            pdf, x0, 138, 144, 34, sim,
+            tariff_import_ht=tariff_import_ht,
+            tariff_import_bt=tariff_import_bt,
+            tariff_export=tariff_export,
+        )
+        conclusion_y = 177
+        note_y = 205
+        schema_y = 216
+        schema_x = x0 + 7
+        schema_w = 130
+    else:
+        # Résidentiel et PME : rendu historique inchangé.
+        conclusion_y = 138
+        note_y = 170
+        schema_y = 187
+        schema_x = x0
+        schema_w = 144
+
+    _info_box(
+        pdf, x0, conclusion_y, 144, 22, "CONCLUSION", conclusion,
+        fill=(255, 251, 249), border=SOLEOL_ORANGE,
+    )
+
+    pdf.set_xy(x0, note_y)
+    pdf.set_font("Arial", "", 10 if not is_ci else 8.2)
     pdf.set_text_color(*MUTED)
-    pdf.multi_cell(145, 4, _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."))
+    pdf.multi_cell(
+        145, 4,
+        _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."),
+    )
 
 
     # Schéma de fonctionnement sous forme d'image.
@@ -769,9 +899,9 @@ def _page_1(pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_
     schema_path = next((p for p in schema_candidates if Path(p).is_file()), None)
 
     if schema_path:
-        # L'image générée est au format horizontal ~1.95:1.
-        # Largeur identique aux blocs de la page 1, hauteur conservant ses proportions.
-        pdf.image(schema_path, x=x0, y=187, w=144)
+        # En C&I, le schéma est légèrement réduit, sans déformer son ratio, afin de
+        # laisser la place au bloc financier tout en conservant une page 1 de synthèse.
+        pdf.image(schema_path, x=schema_x, y=schema_y, w=schema_w)
 
 
 def _page_2(pdf, df, meta, rec, best, big, sim):
@@ -883,6 +1013,7 @@ def generate_battery_report(
     tariff_export: float,
     gain_share: float,
     gain_max_extra: float,
+    study_mode: str = "residential",
     cost_life: float = 13,
     sections=None,
     swissolar=None,
@@ -896,6 +1027,8 @@ def generate_battery_report(
     _page_1(
         pdf, df, meta, best, big, sim, tariff_profile,
         gain_share, gain_max_extra,
+        tariff_import_ht, tariff_import_bt, tariff_export,
+        study_mode=study_mode,
         client_name=client_name,
         logo_path=logo_path,
     )
