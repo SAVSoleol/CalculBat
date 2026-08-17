@@ -405,6 +405,10 @@ else:
     cycles_low = 200.0  # seuil technique interne, non réglable
     mode_rec_label = "Saturation économique C&I"
 
+# Contrainte de puissance pour les batteries PME et C&I.
+# 0,5C signifie : puissance maximale = 50 % de la capacité nominale.
+max_c_rate = 0.5 if study_mode in {"pme", "ci"} else None
+
 # Rendement aller-retour par défaut selon le type d'étude.
 # L'utilisateur peut ensuite ajuster librement la valeur dans la sidebar.
 roundtrip_default = {
@@ -428,6 +432,10 @@ roundtrip_eff = st.sidebar.slider(
 )
 
 st.sidebar.markdown(T("search_range"))
+if study_mode in {"pme", "ci"}:
+    st.sidebar.caption(
+        "Contrainte batterie active : 0,5C → puissance maximale = 50 % de la capacité."
+    )
 st.sidebar.caption(
     "La recommandation est calculée sur toute la plage du mode. "
     "Cap. min/max servent à explorer ou limiter l'affichage, sans déplacer artificiellement le résultat."
@@ -718,6 +726,7 @@ if auto_cap_max:
                 tariff_import_bt=tariff_import_bt,
                 high_tariff_periods=high_tariff_periods,
                 weekend_low_tariff=weekend_low_tariff,
+                max_c_rate=max_c_rate,
             )
         cap_max_effective = _auto_capacity_max_from_curve(
             auto_results,
@@ -750,6 +759,7 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         tariff_import_bt=tariff_import_bt,
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
+        max_c_rate=max_c_rate,
     )
     rec_results = grid_search(
         df.import_kWh.values,
@@ -766,6 +776,7 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         tariff_import_bt=tariff_import_bt,
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
+        max_c_rate=max_c_rate,
     )
     rec = recommend(
         rec_results,
@@ -1283,6 +1294,7 @@ with tab_pay:
         tariff_import_bt=tariff_import_bt,
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
+        max_c_rate=max_c_rate,
     )
     f = pay_gs.loc[pay_gs.groupby("Cap_kWh")["Gain_CHF"].idxmax()] \
               .sort_values("Cap_kWh").reset_index(drop=True)
