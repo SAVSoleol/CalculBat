@@ -380,7 +380,7 @@ study_mode_label = st.sidebar.radio(
     [
         "Autoconsommation résidentielle (5-50 kWh)",
         "PME (50-150 kWh)",
-        "C&I / Industrie (150-750 kWh)",
+        "C&I / Industrie (150-1000 kWh)",
     ],
     index=0,
     key="study_mode_label",
@@ -400,8 +400,8 @@ elif study_mode_label.startswith("PME"):
     mode_rec_label = "Compromis économie, usage et autoconsommation"
 else:
     study_mode = "ci"
-    mode_cap_min, mode_cap_max, mode_cap_step = 150, 750, 10
-    mode_p_min, mode_p_max, mode_p_step = 20, 250, 10
+    mode_cap_min, mode_cap_max, mode_cap_step = 150, 1000, 10
+    mode_p_min, mode_p_max, mode_p_step = 20, 500, 10
     cycles_low = 200.0  # seuil technique interne, non réglable
     mode_rec_label = "Saturation économique C&I"
 
