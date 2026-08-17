@@ -923,6 +923,51 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# --------------------------------------------------------------------------- tableau comparatif grands projets
+# Affiché uniquement en mode C&I / Industrie.
+# Pour chaque palier de 50 kWh, on retient la puissance testée donnant le meilleur gain annuel.
+if study_mode == "ci":
+    st.markdown("### Comparatif des capacités — grands projets")
+
+    comparison = _best_per_capacity_local(rec_results).copy()
+
+    # Affichage de 200 à 1000 kWh par pas de 50 kWh.
+    target_caps = list(range(200, 1001, 50))
+    comparison = comparison[comparison["Cap_kWh"].round().astype(int).isin(target_caps)].copy()
+
+    if not comparison.empty:
+        comparison["Capacité batterie"] = comparison["Cap_kWh"].map(
+            lambda v: f"{float(v):,.0f} kWh".replace(",", " ")
+        )
+        comparison["Puissance optimale"] = comparison["Power_kW"].map(
+            lambda v: f"{float(v):,.0f} kW".replace(",", " ")
+        )
+        comparison["Économie annuelle"] = comparison["Gain_CHF"].map(
+            lambda v: f"{float(v):,.0f} CHF/an".replace(",", " ")
+        )
+        comparison["Cycles/an"] = comparison["Cycles_per_year"].map(
+            lambda v: f"{float(v):.0f}"
+        )
+
+        display_cols = [
+            "Capacité batterie",
+            "Puissance optimale",
+            "Économie annuelle",
+            "Cycles/an",
+        ]
+
+        st.dataframe(
+            comparison[display_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "Pour chaque capacité, le tableau retient la puissance de batterie testée "
+            "qui maximise l'économie annuelle avec les tarifs et le rendement sélectionnés. "
+            "Cette vue est affichée uniquement pour le mode C&I / Industrie."
+        )
+
 st.markdown(
     f"""
     <div class="mar-autoconso">
