@@ -316,8 +316,12 @@ def grid_search(
     tariff_import_bt: float | None = None,
     high_tariff_periods=((7.0, 22.0),),
     weekend_low_tariff: bool = False,
+    max_c_rate: float | None = None,
 ) -> pd.DataFrame:
-    """Simulate every (capacity, power) pair.
+    """Simulate every valid (capacity, power) pair.
+
+    If max_c_rate is set, combinations above Power_kW = Cap_kWh * max_c_rate
+    are excluded from the search. Example: max_c_rate=0.5 enforces a 0.5C battery.
 
     Returns a table with total tariff-based gain and the underlying HT/BT components.
     """
@@ -348,6 +352,11 @@ def grid_search(
 
     for cap in caps:
         for p in powers:
+            # Optional C-rate constraint.
+            # Example 0.5C: 200 kWh -> max 100 kW, 1000 kWh -> max 500 kW.
+            if max_c_rate is not None and float(p) > float(cap) * float(max_c_rate) + 1e-9:
+                continue
+
             usable_cap = float(cap) * (1.0 - float(soc_min_pct) / 100.0)
             usable_cap = max(usable_cap, 0.0)
 
