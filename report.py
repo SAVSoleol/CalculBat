@@ -201,7 +201,7 @@ def _financial_box(
     tariff_import_bt: float,
     tariff_export: float,
 ):
-    """Financial summary displayed only for C&I studies."""
+    """Optional financial summary for Residential, PME or C&I studies."""
     gain_ht = float(getattr(sim, "gain_ht_chf", 0.0) or 0.0)
     gain_bt = float(getattr(sim, "gain_bt_chf", 0.0) or 0.0)
     export_lost = float(getattr(sim, "export_value_lost_chf", 0.0) or 0.0)
@@ -699,6 +699,7 @@ def _plot_monthly_export(df, sim) -> BytesIO:
 def _page_1(
     pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra,
     tariff_import_ht, tariff_import_bt, tariff_export, study_mode="residential",
+    show_financial: bool = False,
     client_name="", logo_path=None,
 ):
     pdf.add_page()
@@ -849,10 +850,10 @@ def _page_1(
         f"de {_kwh(export_avoided)} kWh."
     )
 
-    is_ci = str(study_mode).lower() == "ci"
+    financial_enabled = bool(show_financial)
 
-    if is_ci:
-        # Bloc financier affiché uniquement pour les études C&I / Industrie.
+    if financial_enabled:
+        # Bloc financier optionnel, disponible pour Résidentiel, PME et C&I.
         _financial_box(
             pdf, x0, 138, 144, 34, sim,
             tariff_import_ht=tariff_import_ht,
@@ -865,7 +866,7 @@ def _page_1(
         schema_x = x0 + 7
         schema_w = 130
     else:
-        # Résidentiel et PME : rendu historique inchangé.
+        # Sans bloc financier : rendu historique inchangé.
         conclusion_y = 138
         note_y = 170
         schema_y = 187
@@ -878,7 +879,7 @@ def _page_1(
     )
 
     pdf.set_xy(x0, note_y)
-    pdf.set_font("Arial", "", 10 if not is_ci else 8.2)
+    pdf.set_font("Arial", "", 8.2 if financial_enabled else 10)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(
         145, 4,
@@ -1014,6 +1015,7 @@ def generate_battery_report(
     gain_share: float,
     gain_max_extra: float,
     study_mode: str = "residential",
+    show_financial: bool = False,
     cost_life: float = 13,
     sections=None,
     swissolar=None,
@@ -1029,6 +1031,7 @@ def generate_battery_report(
         gain_share, gain_max_extra,
         tariff_import_ht, tariff_import_bt, tariff_export,
         study_mode=study_mode,
+        show_financial=show_financial,
         client_name=client_name,
         logo_path=logo_path,
     )
