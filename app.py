@@ -405,6 +405,17 @@ else:
     cycles_low = 200.0  # seuil technique interne, non réglable
     mode_rec_label = "Saturation économique C&I"
 
+# Option visible immédiatement sous le type d'étude.
+show_financial_in_report = st.sidebar.checkbox(
+    "Afficher l'économie financière dans le rapport PDF",
+    value=(study_mode == "ci"),
+    key=f"show_financial_report_{study_mode}",
+    help=(
+        "Ajoute ou masque le bloc d'économie annuelle sur la page 1 du rapport PDF. "
+        "Disponible pour Résidentiel, PME et C&I."
+    ),
+)
+
 # Contrainte de puissance pour les batteries PME et C&I.
 # 0,5C signifie : puissance maximale = 50 % de la capacité nominale.
 max_c_rate = 0.5 if study_mode in {"pme", "ci"} else None
@@ -1382,6 +1393,7 @@ pdf_bytes = generate_battery_report(
     gain_share=gain_share,
     gain_max_extra=gain_max_extra,
     study_mode=study_mode,
+    show_financial=show_financial_in_report,
     cost_life=cost_life,
     sections=pdf_sections,
     swissolar=swissolar,
