@@ -982,7 +982,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         f"La batterie réduit les achats réseau de {import_reduc:.0f}% et l'injection de "
         f"{export_reduc:.0f}%. Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire "
         f"avec environ {best.Cycles_per_year:.0f} cycles équivalents par an. "
-        "La capacité retenue correspond au meilleur compromis entre énergie valorisée, "
+    
         "puissance disponible et utilisation annuelle.",
         fill=LIGHT_BG,
         border=BLUE,
