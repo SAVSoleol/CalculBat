@@ -423,8 +423,11 @@ max_c_rate = 0.5 if study_mode in {"pme", "ci"} else None
 # Peak Shaving : disponible uniquement en C&I / Industrie.
 peak_shaving_enabled = False
 peak_power_tariff = 0.0
+peak_billing_mode = "annual_band"
 peak_reserve_pct = 30.0
 peak_grid_recharge = True
+sungrow_st225_preset = False
+sungrow_st225_units = 2
 if study_mode == "ci":
     st.sidebar.markdown("**Peak Shaving**")
     peak_shaving_enabled = st.sidebar.checkbox(
@@ -437,6 +440,25 @@ if study_mode == "ci":
         ),
     )
     if peak_shaving_enabled:
+        billing_label = st.sidebar.selectbox(
+            "Mode de facturation de la puissance",
+            [
+                "Bande annuelle (maximum annuel facturé toute l'année)",
+                "Maximum mensuel",
+            ],
+            index=0,
+            key="ci_peak_billing_mode",
+            help=(
+                "Bande annuelle : le plus haut appel de puissance de l'année fixe la bande "
+                "facturée pendant 12 mois. Maximum mensuel : chaque mois est calculé séparément."
+            ),
+        )
+        peak_billing_mode = (
+            "annual_band"
+            if billing_label.startswith("Bande annuelle")
+            else "monthly_max"
+        )
+
         peak_power_tariff = st.sidebar.number_input(
             "Tarif de puissance (CHF/kW/mois)",
             min_value=0.0,
@@ -444,8 +466,35 @@ if study_mode == "ci":
             step=0.5,
             format="%.2f",
             key="ci_peak_power_tariff",
-            help="Composante mensuelle facturée sur la puissance maximale du mois.",
+            help=(
+                "Prix facturé par kW de puissance et par mois. En mode bande annuelle, "
+                "l'économie calculée vaut réduction de bande × tarif × 12."
+            ),
         )
+
+        st.sidebar.markdown("**Configuration Sungrow**")
+        sungrow_st225_preset = st.sidebar.checkbox(
+            "Utiliser des PowerStack ST225 (229 kWh / 110 kW)",
+            value=True,
+            key="ci_sungrow_st225_preset",
+            help=(
+                "Force la simulation sur un nombre entier de PowerStack ST225. "
+                "Une unité = 229 kWh et 110 kW AC nominaux."
+            ),
+        )
+        if sungrow_st225_preset:
+            sungrow_st225_units = st.sidebar.number_input(
+                "Nombre de batteries ST225",
+                min_value=1,
+                max_value=10,
+                value=2,
+                step=1,
+                key="ci_sungrow_st225_units",
+            )
+            st.sidebar.success(
+                f"Configuration étudiée : {229 * int(sungrow_st225_units)} kWh / "
+                f"{110 * int(sungrow_st225_units)} kW"
+            )
         peak_reserve_pct = st.sidebar.slider(
             "Réserve batterie pour les pointes (%)",
             min_value=0,
@@ -713,7 +762,11 @@ peak_target_kw = None
 measured_peak_kw = float(df.import_kWh.max() / meta.dt_hours) if meta.dt_hours > 0 else 0.0
 if study_mode == "ci" and peak_shaving_enabled:
     st.sidebar.caption(f"Pointe mesurée : {measured_peak_kw:,.1f} kW".replace(",", " "))
-    default_target = max(0.0, measured_peak_kw * 0.90)
+    preset_power_kw = 110.0 * int(sungrow_st225_units) if sungrow_st225_preset else 0.0
+    default_target = max(
+        0.0,
+        measured_peak_kw - preset_power_kw if preset_power_kw > 0 else measured_peak_kw * 0.90,
+    )
     peak_target_kw = st.sidebar.number_input(
         "Seuil réseau cible (kW)",
         min_value=0.0,
@@ -781,11 +834,22 @@ def _auto_capacity_max_from_curve(
 powers = list(range(int(p_min), int(p_max) + 1, int(p_step)))
 cap_max_effective = int(cap_max)
 
+# En mode C&I avec le préréglage Sungrow, on étudie exactement la configuration choisie.
+# Exemple : 2 x ST225 = 458 kWh / 220 kW.
+fixed_sungrow_config = bool(
+    study_mode == "ci" and peak_shaving_enabled and sungrow_st225_preset
+)
+if fixed_sungrow_config:
+    fixed_cap_kwh = 229 * int(sungrow_st225_units)
+    fixed_power_kw = 110 * int(sungrow_st225_units)
+    powers = [fixed_power_kw]
+    cap_max_effective = fixed_cap_kwh
+
 # Important : la recommandation est calculée sur la plage complète du mode,
 # pas sur Cap.min. Ainsi, déplacer Cap.min ne déplace plus artificiellement le knee point.
 calc_cap_min = int(mode_cap_min)
 
-if auto_cap_max:
+if auto_cap_max and not fixed_sungrow_config:
     auto_limit = int(cap_max)
     auto_caps = list(range(calc_cap_min, auto_limit + 1, int(cap_step)))
     if auto_caps and powers:
@@ -809,6 +873,7 @@ if auto_cap_max:
                 peak_shaving_enabled=peak_shaving_enabled,
                 peak_target_kW=peak_target_kw,
                 peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+        peak_billing_mode=peak_billing_mode,
                 peak_reserve_pct=peak_reserve_pct,
                 peak_grid_recharge=peak_grid_recharge,
             )
@@ -819,9 +884,13 @@ if auto_cap_max:
         )
         st.sidebar.caption(f"Cap. max auto utilisée : {cap_max_effective} kWh")
 
-calc_caps = list(range(calc_cap_min, int(cap_max_effective) + 1, int(cap_step)))
-display_min = max(int(cap_min), calc_cap_min)
-display_caps = list(range(display_min, int(cap_max_effective) + 1, int(cap_step)))
+if fixed_sungrow_config:
+    calc_caps = [fixed_cap_kwh]
+    display_caps = [fixed_cap_kwh]
+else:
+    calc_caps = list(range(calc_cap_min, int(cap_max_effective) + 1, int(cap_step)))
+    display_min = max(int(cap_min), calc_cap_min)
+    display_caps = list(range(display_min, int(cap_max_effective) + 1, int(cap_step)))
 
 if not calc_caps or not powers:
     st.error(T("empty_range"))
@@ -847,6 +916,7 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         peak_shaving_enabled=peak_shaving_enabled,
         peak_target_kW=peak_target_kw,
         peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+        peak_billing_mode=peak_billing_mode,
         peak_reserve_pct=peak_reserve_pct,
         peak_grid_recharge=peak_grid_recharge,
     )
@@ -869,6 +939,7 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         peak_shaving_enabled=peak_shaving_enabled,
         peak_target_kW=peak_target_kw,
         peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+        peak_billing_mode=peak_billing_mode,
         peak_reserve_pct=peak_reserve_pct,
         peak_grid_recharge=peak_grid_recharge,
     )
@@ -901,7 +972,9 @@ sim = simulate(
     peak_shaving_enabled=peak_shaving_enabled,
     peak_target_kW=peak_target_kw,
     peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+                peak_billing_mode=peak_billing_mode,
     peak_reserve_pct=peak_reserve_pct,
+    peak_grid_recharge=peak_grid_recharge,
 )
 
 # --------------------------------------------------------------------------- KPI cards
@@ -1202,6 +1275,23 @@ with st.expander("Détail du gain tarifaire", expanded=False):
         f"Profil utilisé : {tariff_profile}."
     )
 
+    if peak_shaving_enabled:
+        billing_txt = (
+            "bande annuelle"
+            if peak_billing_mode == "annual_band"
+            else "maximum mensuel"
+        )
+        st.subheader("Peak Shaving")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Pointe avant", f"{sim.peak_before_kW:.0f} kW")
+        p2.metric("Pointe après", f"{sim.peak_after_kW:.0f} kW")
+        p3.metric("Bande réduite", f"{sim.peak_reduction_kW:.0f} kW")
+        p4.metric("Économie puissance", f"{sim.peak_savings_chf:,.0f} CHF/an".replace(",", " "))
+        st.caption(
+            f"Mode de facturation : {billing_txt}. "
+            f"Tarif puissance : {peak_power_tariff:.2f} CHF/kW/mois."
+        )
+
 if study_mode == "ci" and peak_shaving_enabled:
     recharge_note = (
         "La réserve peut être maintenue depuis le réseau sans dépasser le seuil. "
@@ -1428,7 +1518,7 @@ with tab_pay:
     # Two size lenses (notebook §29): whole-system payback (money optimum) + cycles/yr
     # (price-free use proxy). The recommendation is where they agree; each corrects a
     # different misreading of a single money view.
-    pay_caps = list(range(int(mode_cap_min), int(cap_max_effective) + 1, int(cap_step)))
+    pay_caps = [fixed_cap_kwh] if fixed_sungrow_config else list(range(int(mode_cap_min), int(cap_max_effective) + 1, int(cap_step)))
     pay_gs = grid_search(
         df.import_kWh.values,
         df.export_kWh.values,
@@ -1448,6 +1538,7 @@ with tab_pay:
         peak_shaving_enabled=peak_shaving_enabled,
         peak_target_kW=peak_target_kw,
         peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+        peak_billing_mode=peak_billing_mode,
         peak_reserve_pct=peak_reserve_pct,
         peak_grid_recharge=peak_grid_recharge,
     )

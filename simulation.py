@@ -211,6 +211,8 @@ class SimResult:
     peak_after_kW: float
     peak_reduction_kW: float
     peak_savings_chf: float
+    peak_billing_mode: str
+    peak_power_tariff_chf_per_kw_month: float
 
     cycles_per_year: float
     usable_capacity_kWh: float
@@ -304,6 +306,60 @@ def _tariff_vectors(
     return tariffs, ht_mask, bt_mask
 
 
+
+def _peak_power_savings(
+    imp: np.ndarray,
+    imp_after: np.ndarray,
+    dt_hours: float,
+    timestamps,
+    tariff_chf_per_kw_month: float,
+    billing_mode: str,
+) -> tuple[float, float, float, float]:
+    """Return annual peak-power saving and peak diagnostics.
+
+    billing_mode:
+    - "annual_band": the highest 15-min demand of the analysed year defines one
+      billed power band for the whole year. Saving = reduced annual peak x tariff x 12.
+    - "monthly_max": each month's maximum demand is billed independently.
+
+    The tariff input remains in CHF/kW/month in both modes.
+    """
+    if len(imp) == 0 or dt_hours <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    before_kw = np.asarray(imp, dtype=float) / float(dt_hours)
+    after_kw = np.asarray(imp_after, dtype=float) / float(dt_hours)
+
+    peak_before_kw = float(np.max(before_kw))
+    peak_after_kw = float(np.max(after_kw))
+    peak_reduction_kw = max(0.0, peak_before_kw - peak_after_kw)
+
+    tariff = max(0.0, float(tariff_chf_per_kw_month))
+    mode = str(billing_mode or "annual_band").lower()
+
+    if tariff <= 0:
+        return 0.0, peak_before_kw, peak_after_kw, peak_reduction_kw
+
+    if mode == "annual_band":
+        saving = peak_reduction_kw * tariff * 12.0
+        return float(saving), peak_before_kw, peak_after_kw, peak_reduction_kw
+
+    idx = _as_datetime_index(timestamps)
+    if idx is None or len(idx) != len(imp):
+        return 0.0, peak_before_kw, peak_after_kw, peak_reduction_kw
+
+    monthly = pd.DataFrame({
+        "month": idx.to_period("M"),
+        "before_kw": before_kw,
+        "after_kw": after_kw,
+    })
+    monthly_peaks = monthly.groupby("month")[["before_kw", "after_kw"]].max()
+    monthly_reduction = (
+        monthly_peaks["before_kw"] - monthly_peaks["after_kw"]
+    ).clip(lower=0.0)
+    saving = float(monthly_reduction.sum() * tariff)
+    return saving, peak_before_kw, peak_after_kw, peak_reduction_kw
+
 def simulate(
     import_kWh: np.ndarray,
     export_kWh: np.ndarray,
@@ -323,6 +379,7 @@ def simulate(
     peak_shaving_enabled: bool = False,
     peak_target_kW: float | None = None,
     peak_power_tariff_chf_per_kw_month: float = 0.0,
+    peak_billing_mode: str = "annual_band",
     peak_reserve_pct: float = 30.0,
     peak_grid_recharge: bool = True,
 ) -> SimResult:
@@ -375,20 +432,23 @@ def simulate(
     gain_import = float((avoided_by_interval * tariffs).sum())
     export_value_lost = float(stored_by_interval.sum() * tariff_export)
 
-    peak_before_kw = float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0
-    peak_after_kw = float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0
-    peak_reduction_kw = max(0.0, peak_before_kw - peak_after_kw)
-    peak_savings_chf = 0.0
-    idx = _as_datetime_index(timestamps)
-    if peak_active and float(peak_power_tariff_chf_per_kw_month) > 0 and idx is not None and len(idx) == len(imp):
-        monthly = pd.DataFrame({
-            "month": idx.to_period("M"),
-            "before_kw": imp / float(dt_hours),
-            "after_kw": imp_after / float(dt_hours),
-        })
-        monthly_peaks = monthly.groupby("month")[["before_kw", "after_kw"]].max()
-        monthly_reduction = (monthly_peaks["before_kw"] - monthly_peaks["after_kw"]).clip(lower=0.0)
-        peak_savings_chf = float(monthly_reduction.sum() * float(peak_power_tariff_chf_per_kw_month))
+    peak_savings_chf, peak_before_kw, peak_after_kw, peak_reduction_kw = _peak_power_savings(
+        imp,
+        imp_after,
+        dt_hours,
+        timestamps,
+        peak_power_tariff_chf_per_kw_month,
+        peak_billing_mode,
+    ) if peak_active else (
+        0.0,
+        float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0,
+        float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0,
+        max(
+            0.0,
+            (float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0)
+            - (float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0),
+        ),
+    )
 
     gain = gain_import - export_value_lost + peak_savings_chf
 
@@ -430,6 +490,8 @@ def simulate(
         peak_after_kW=peak_after_kw,
         peak_reduction_kW=peak_reduction_kw,
         peak_savings_chf=peak_savings_chf,
+        peak_billing_mode=str(peak_billing_mode),
+        peak_power_tariff_chf_per_kw_month=float(peak_power_tariff_chf_per_kw_month),
         cycles_per_year=float(cycles_per_year),
         usable_capacity_kWh=float(usable_capacity_kWh),
         soc_min_pct=float(soc_min_pct),
@@ -460,6 +522,7 @@ def grid_search(
     peak_shaving_enabled: bool = False,
     peak_target_kW: float | None = None,
     peak_power_tariff_chf_per_kw_month: float = 0.0,
+    peak_billing_mode: str = "annual_band",
     peak_reserve_pct: float = 30.0,
     peak_grid_recharge: bool = True,
 ) -> pd.DataFrame:
@@ -527,20 +590,23 @@ def grid_search(
             gain_import = float((avoided_by_interval * tariffs).sum())
             export_value_lost = float(export_stored * tariff_export)
 
-            peak_before_kw = float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0
-            peak_after_kw = float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0
-            peak_reduction_kw = max(0.0, peak_before_kw - peak_after_kw)
-            peak_savings_chf = 0.0
-            idx = _as_datetime_index(timestamps)
-            if peak_active and float(peak_power_tariff_chf_per_kw_month) > 0 and idx is not None and len(idx) == len(imp):
-                monthly = pd.DataFrame({
-                    "month": idx.to_period("M"),
-                    "before_kw": imp / float(dt_hours),
-                    "after_kw": imp_after / float(dt_hours),
-                })
-                monthly_peaks = monthly.groupby("month")[["before_kw", "after_kw"]].max()
-                monthly_reduction = (monthly_peaks["before_kw"] - monthly_peaks["after_kw"]).clip(lower=0.0)
-                peak_savings_chf = float(monthly_reduction.sum() * float(peak_power_tariff_chf_per_kw_month))
+            peak_savings_chf, peak_before_kw, peak_after_kw, peak_reduction_kw = _peak_power_savings(
+                imp,
+                imp_after,
+                dt_hours,
+                timestamps,
+                peak_power_tariff_chf_per_kw_month,
+                peak_billing_mode,
+            ) if peak_active else (
+                0.0,
+                float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0,
+                float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0,
+                max(
+                    0.0,
+                    (float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0)
+                    - (float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0),
+                ),
+            )
 
             gain = gain_import - export_value_lost + peak_savings_chf
 
@@ -563,6 +629,7 @@ def grid_search(
                     "Peak_after_kW": float(peak_after_kw),
                     "Peak_reduction_kW": float(peak_reduction_kw),
                     "Peak_target_kW": float(peak_target_kW) if peak_active else np.nan,
+                    "Peak_billing_mode": str(peak_billing_mode),
                     "Import_avoided_kWh": float(discharge_tot),
                     "Import_avoided_HT_kWh": float(import_avoided_ht),
                     "Import_avoided_BT_kWh": float(import_avoided_bt),

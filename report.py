@@ -290,7 +290,7 @@ def _financial_box(
         pdf.set_xy(net_x, y + 32)
         pdf.set_font("Arial", "", 5.6)
         pdf.set_text_color(*MUTED)
-        pdf.cell(net_w, 3, _tx(f"dont Peak Shaving: {_chf(peak_savings)} CHF"), align="C")
+        pdf.cell(net_w, 3, _tx(f"dont Peak Shaving: {_chf(peak_savings)} CHF/an"), align="C")
 
 
 def _draw_arrow(pdf: FPDF, x1: float, y: float, x2: float, color, dashed: bool = False):
@@ -968,9 +968,13 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         f"Capacité utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
     )
     if bool(getattr(sim, "peak_shaving_enabled", False)):
+        billing_mode = str(getattr(sim, "peak_billing_mode", "annual_band"))
+        billing_label = "bande annuelle" if billing_mode == "annual_band" else "maximum mensuel"
         battery_text += (
             f"\nPeak réseau : {getattr(sim, 'peak_before_kW', 0):.1f} -> "
             f"{getattr(sim, 'peak_after_kW', 0):.1f} kW"
+            f"\nRéduction : {getattr(sim, 'peak_reduction_kW', 0):.1f} kW"
+            f" | {billing_label}"
         )
 
     _info_box(
@@ -987,7 +991,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         f"Profil GRD : {tariff_profile} | Pas de temps : {meta.dt_hours * 60:.0f} min | "
         f"Couverture : {meta.coverage_days:.0f} jours\n"
         f"Tarifs : HT {tariff_import_ht:.2f}, BT {tariff_import_bt:.2f}, "
-        f"rachat {tariff_export:.2f} CHF/kWh.",
+        f"rachat {tariff_export:.2f} CHF/kWh." + (f" Peak Shaving : {getattr(sim, 'peak_power_tariff_chf_per_kw_month', 0):.2f} CHF/kW/mois, "f"{'bande annuelle' if getattr(sim, 'peak_billing_mode', 'annual_band') == 'annual_band' else 'maximum mensuel'}." if bool(getattr(sim, "peak_shaving_enabled", False)) else ""),
         fill=LIGHT_ORANGE,
         border=SOLEOL_ORANGE,
     )
