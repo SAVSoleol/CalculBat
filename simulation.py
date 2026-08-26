@@ -77,7 +77,7 @@ def _dispatch(imp, exp, capacity, power_per_step, eta):
             discharge_i = 0.0
 
         soc_val -= discharge_i / eta
-        imp_after[i] = import_with_grid_charge - discharge_i
+        imp_after[i] = imp[i] - discharge_i
         discharge_tot += discharge_i
 
         soc[i] = soc_val
@@ -94,7 +94,8 @@ def _dispatch_peak_shaving(imp, exp, capacity, power_per_step, eta, dt_hours, pe
     2) shave import above ``peak_target_kw`` using all available SOC;
     3) use only SOC above the configured reserve for ordinary self-consumption.
 
-    The model intentionally does not grid-charge the battery.
+    Optional controlled grid charging can maintain the peak-shaving reserve without
+    exceeding the configured grid-power target.
     """
     n = imp.shape[0]
     imp_after = np.empty(n)
@@ -173,7 +174,7 @@ def _dispatch_peak_shaving(imp, exp, capacity, power_per_step, eta, dt_hours, pe
 
         soc_val -= discharge_normal / eta
         discharge_i = discharge_peak + discharge_normal
-        imp_after[i] = imp[i] - discharge_i
+        imp_after[i] = import_with_grid_charge - discharge_i
         discharge_tot += discharge_i
         soc[i] = soc_val
 
