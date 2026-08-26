@@ -206,6 +206,7 @@ def _financial_box(
     gain_bt = float(getattr(sim, "gain_bt_chf", 0.0) or 0.0)
     export_lost = float(getattr(sim, "export_value_lost_chf", 0.0) or 0.0)
     net_gain = float(getattr(sim, "gain_chf", gain_ht + gain_bt - export_lost) or 0.0)
+    peak_savings = float(getattr(sim, "peak_savings_chf", 0.0) or 0.0)
 
     avoided_ht = float(getattr(sim, "import_avoided_ht", 0.0) or 0.0)
     avoided_bt = float(getattr(sim, "import_avoided_bt", 0.0) or 0.0)
@@ -284,6 +285,12 @@ def _financial_box(
     pdf.set_font("Arial", "B", 8)
     pdf.set_text_color(*GREEN)
     pdf.cell(net_w, 5, "CHF/an", align="C")
+
+    if peak_savings > 0:
+        pdf.set_xy(net_x, y + 32)
+        pdf.set_font("Arial", "", 5.6)
+        pdf.set_text_color(*MUTED)
+        pdf.cell(net_w, 3, _tx(f"dont Peak Shaving: {_chf(peak_savings)} CHF"), align="C")
 
 
 def _draw_arrow(pdf: FPDF, x1: float, y: float, x2: float, color, dashed: bool = False):
@@ -954,13 +961,22 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         border=BLUE,
     )
 
-    _info_box(
-        pdf, 108, 28, 90, 39,
-        "BATTERIE",
+    battery_text = (
         f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
         f"Puissance : {best.Power_kW:.0f} kW\n"
         f"Cycles équivalents : {best.Cycles_per_year:.0f} cycles/an\n"
-        f"Capacité utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh",
+        f"Capacité utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
+    )
+    if bool(getattr(sim, "peak_shaving_enabled", False)):
+        battery_text += (
+            f"\nPeak réseau : {getattr(sim, 'peak_before_kW', 0):.1f} -> "
+            f"{getattr(sim, 'peak_after_kW', 0):.1f} kW"
+        )
+
+    _info_box(
+        pdf, 108, 28, 90, 44 if bool(getattr(sim, "peak_shaving_enabled", False)) else 39,
+        "BATTERIE",
+        battery_text,
         fill=LIGHT_GREEN,
         border=GREEN,
     )
@@ -982,7 +998,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         f"La batterie réduit les achats réseau de {import_reduc:.0f}% et l'injection de "
         f"{export_reduc:.0f}%. Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire "
         f"avec environ {best.Cycles_per_year:.0f} cycles équivalents par an. "
-    
+        "La capacité retenue correspond au meilleur compromis entre énergie valorisée, "
         "puissance disponible et utilisation annuelle.",
         fill=LIGHT_BG,
         border=BLUE,

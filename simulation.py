@@ -77,9 +77,104 @@ def _dispatch(imp, exp, capacity, power_per_step, eta):
             discharge_i = 0.0
 
         soc_val -= discharge_i / eta
-        imp_after[i] = imp[i] - discharge_i
+        imp_after[i] = import_with_grid_charge - discharge_i
         discharge_tot += discharge_i
 
+        soc[i] = soc_val
+
+    return imp_after, exp_after, soc, charge_tot, discharge_tot
+
+
+@njit(cache=True)
+def _dispatch_peak_shaving(imp, exp, capacity, power_per_step, eta, dt_hours, peak_target_kw, reserve_fraction, grid_recharge):
+    """Combined self-consumption + peak-shaving dispatch.
+
+    Priority:
+    1) charge from PV surplus;
+    2) shave import above ``peak_target_kw`` using all available SOC;
+    3) use only SOC above the configured reserve for ordinary self-consumption.
+
+    The model intentionally does not grid-charge the battery.
+    """
+    n = imp.shape[0]
+    imp_after = np.empty(n)
+    exp_after = np.empty(n)
+    soc = np.empty(n)
+
+    reserve_energy = capacity * reserve_fraction
+    # A C&I peak-shaving controller normally starts with its reserve available.
+    # This avoids making the result depend on the arbitrary first timestamp of the file.
+    soc_val = reserve_energy
+    charge_tot = 0.0
+    discharge_tot = 0.0
+    peak_step = peak_target_kw * dt_hours
+
+    for i in range(n):
+        charge_i = exp[i]
+        if charge_i > power_per_step:
+            charge_i = power_per_step
+        max_charge = (capacity - soc_val) / eta
+        if charge_i > max_charge:
+            charge_i = max_charge
+        if charge_i < 0.0:
+            charge_i = 0.0
+
+        soc_val += charge_i * eta
+        exp_after[i] = exp[i] - charge_i
+        charge_tot += charge_i
+
+        # Keep the reserve topped up from the grid when there is headroom below the
+        # target. This is not energy arbitrage: grid charging stops at the reserve
+        # level and never creates a new peak above the configured target.
+        grid_charge_i = 0.0
+        if grid_recharge and soc_val < reserve_energy and imp[i] < peak_step:
+            headroom = peak_step - imp[i]
+            missing_input = (reserve_energy - soc_val) / eta
+            grid_charge_i = headroom
+            if grid_charge_i > power_per_step:
+                grid_charge_i = power_per_step
+            if grid_charge_i > missing_input:
+                grid_charge_i = missing_input
+            if grid_charge_i < 0.0:
+                grid_charge_i = 0.0
+            soc_val += grid_charge_i * eta
+
+        import_with_grid_charge = imp[i] + grid_charge_i
+
+        # First priority: shave the part of the interval above the target.
+        peak_need = import_with_grid_charge - peak_step
+        if peak_need < 0.0:
+            peak_need = 0.0
+        if peak_need > power_per_step:
+            peak_need = power_per_step
+
+        max_discharge_full = soc_val * eta
+        discharge_peak = peak_need
+        if discharge_peak > max_discharge_full:
+            discharge_peak = max_discharge_full
+
+        soc_val -= discharge_peak / eta
+        remaining_import = import_with_grid_charge - discharge_peak
+
+        # Second priority: ordinary self-consumption, but preserve the reserve.
+        normal_power_left = power_per_step - discharge_peak
+        available_above_reserve = soc_val - reserve_energy
+        if available_above_reserve < 0.0:
+            available_above_reserve = 0.0
+        normal_soc_available = available_above_reserve * eta
+
+        discharge_normal = remaining_import
+        if discharge_normal > normal_power_left:
+            discharge_normal = normal_power_left
+        if discharge_normal > normal_soc_available:
+            discharge_normal = normal_soc_available
+        if discharge_normal < 0.0:
+            discharge_normal = 0.0
+
+        soc_val -= discharge_normal / eta
+        discharge_i = discharge_peak + discharge_normal
+        imp_after[i] = imp[i] - discharge_i
+        discharge_tot += discharge_i
         soc[i] = soc_val
 
     return imp_after, exp_after, soc, charge_tot, discharge_tot
@@ -107,6 +202,14 @@ class SimResult:
     gain_ht_chf: float
     gain_bt_chf: float
     export_value_lost_chf: float
+
+    peak_shaving_enabled: bool
+    peak_target_kW: float | None
+    peak_reserve_pct: float
+    peak_before_kW: float
+    peak_after_kW: float
+    peak_reduction_kW: float
+    peak_savings_chf: float
 
     cycles_per_year: float
     usable_capacity_kWh: float
@@ -216,6 +319,11 @@ def simulate(
     tariff_import_bt: float | None = None,
     high_tariff_periods=((7.0, 22.0),),
     weekend_low_tariff: bool = False,
+    peak_shaving_enabled: bool = False,
+    peak_target_kW: float | None = None,
+    peak_power_tariff_chf_per_kw_month: float = 0.0,
+    peak_reserve_pct: float = 30.0,
+    peak_grid_recharge: bool = True,
 ) -> SimResult:
     """Run one battery simulation.
 
@@ -235,9 +343,17 @@ def simulate(
     usable_capacity_kWh = float(capacity_kWh) * (1.0 - float(soc_min_pct) / 100.0)
     usable_capacity_kWh = max(usable_capacity_kWh, 0.0)
 
-    imp_after, exp_after, soc, charge_tot, discharge_tot = _dispatch(
-        imp, exp, usable_capacity_kWh, power_per_step, eta
-    )
+    peak_active = bool(peak_shaving_enabled and peak_target_kW is not None and float(peak_target_kW) >= 0.0)
+    if peak_active:
+        reserve_fraction = min(max(float(peak_reserve_pct) / 100.0, 0.0), 1.0)
+        imp_after, exp_after, soc, charge_tot, discharge_tot = _dispatch_peak_shaving(
+            imp, exp, usable_capacity_kWh, power_per_step, eta, float(dt_hours),
+            float(peak_target_kW), reserve_fraction, bool(peak_grid_recharge)
+        )
+    else:
+        imp_after, exp_after, soc, charge_tot, discharge_tot = _dispatch(
+            imp, exp, usable_capacity_kWh, power_per_step, eta
+        )
 
     avoided_by_interval = imp - imp_after
     stored_by_interval = exp - exp_after
@@ -257,7 +373,23 @@ def simulate(
 
     gain_import = float((avoided_by_interval * tariffs).sum())
     export_value_lost = float(stored_by_interval.sum() * tariff_export)
-    gain = gain_import - export_value_lost
+
+    peak_before_kw = float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0
+    peak_after_kw = float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0
+    peak_reduction_kw = max(0.0, peak_before_kw - peak_after_kw)
+    peak_savings_chf = 0.0
+    idx = _as_datetime_index(timestamps)
+    if peak_active and float(peak_power_tariff_chf_per_kw_month) > 0 and idx is not None and len(idx) == len(imp):
+        monthly = pd.DataFrame({
+            "month": idx.to_period("M"),
+            "before_kw": imp / float(dt_hours),
+            "after_kw": imp_after / float(dt_hours),
+        })
+        monthly_peaks = monthly.groupby("month")[["before_kw", "after_kw"]].max()
+        monthly_reduction = (monthly_peaks["before_kw"] - monthly_peaks["after_kw"]).clip(lower=0.0)
+        peak_savings_chf = float(monthly_reduction.sum() * float(peak_power_tariff_chf_per_kw_month))
+
+    gain = gain_import - export_value_lost + peak_savings_chf
 
     gain_ht = float(import_avoided_ht * (tariff_import_ht if tariff_import_ht is not None else tariff_import))
     gain_bt = float(import_avoided_bt * (tariff_import_bt if tariff_import_bt is not None else tariff_import))
@@ -290,6 +422,13 @@ def simulate(
         gain_ht_chf=float(gain_ht),
         gain_bt_chf=float(gain_bt),
         export_value_lost_chf=export_value_lost,
+        peak_shaving_enabled=peak_active,
+        peak_target_kW=float(peak_target_kW) if peak_active else None,
+        peak_reserve_pct=float(peak_reserve_pct),
+        peak_before_kW=peak_before_kw,
+        peak_after_kW=peak_after_kw,
+        peak_reduction_kW=peak_reduction_kw,
+        peak_savings_chf=peak_savings_chf,
         cycles_per_year=float(cycles_per_year),
         usable_capacity_kWh=float(usable_capacity_kWh),
         soc_min_pct=float(soc_min_pct),
@@ -317,6 +456,11 @@ def grid_search(
     high_tariff_periods=((7.0, 22.0),),
     weekend_low_tariff: bool = False,
     max_c_rate: float | None = None,
+    peak_shaving_enabled: bool = False,
+    peak_target_kW: float | None = None,
+    peak_power_tariff_chf_per_kw_month: float = 0.0,
+    peak_reserve_pct: float = 30.0,
+    peak_grid_recharge: bool = True,
 ) -> pd.DataFrame:
     """Simulate every valid (capacity, power) pair.
 
@@ -360,9 +504,17 @@ def grid_search(
             usable_cap = float(cap) * (1.0 - float(soc_min_pct) / 100.0)
             usable_cap = max(usable_cap, 0.0)
 
-            imp_after, exp_after, _, charge_tot, discharge_tot = _dispatch(
-                imp, exp, usable_cap, float(p) * dt_hours, eta
-            )
+            peak_active = bool(peak_shaving_enabled and peak_target_kW is not None and float(peak_target_kW) >= 0.0)
+            if peak_active:
+                reserve_fraction = min(max(float(peak_reserve_pct) / 100.0, 0.0), 1.0)
+                imp_after, exp_after, _, charge_tot, discharge_tot = _dispatch_peak_shaving(
+                    imp, exp, usable_cap, float(p) * dt_hours, eta, float(dt_hours),
+                    float(peak_target_kW), reserve_fraction, bool(peak_grid_recharge)
+                )
+            else:
+                imp_after, exp_after, _, charge_tot, discharge_tot = _dispatch(
+                    imp, exp, usable_cap, float(p) * dt_hours, eta
+                )
 
             avoided_by_interval = imp - imp_after
             stored_by_interval = exp - exp_after
@@ -373,7 +525,23 @@ def grid_search(
 
             gain_import = float((avoided_by_interval * tariffs).sum())
             export_value_lost = float(export_stored * tariff_export)
-            gain = gain_import - export_value_lost
+
+            peak_before_kw = float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0
+            peak_after_kw = float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0
+            peak_reduction_kw = max(0.0, peak_before_kw - peak_after_kw)
+            peak_savings_chf = 0.0
+            idx = _as_datetime_index(timestamps)
+            if peak_active and float(peak_power_tariff_chf_per_kw_month) > 0 and idx is not None and len(idx) == len(imp):
+                monthly = pd.DataFrame({
+                    "month": idx.to_period("M"),
+                    "before_kw": imp / float(dt_hours),
+                    "after_kw": imp_after / float(dt_hours),
+                })
+                monthly_peaks = monthly.groupby("month")[["before_kw", "after_kw"]].max()
+                monthly_reduction = (monthly_peaks["before_kw"] - monthly_peaks["after_kw"]).clip(lower=0.0)
+                peak_savings_chf = float(monthly_reduction.sum() * float(peak_power_tariff_chf_per_kw_month))
+
+            gain = gain_import - export_value_lost + peak_savings_chf
 
             cycles_year = (
                 discharge_tot / usable_cap * 365.0 / days
@@ -389,6 +557,11 @@ def grid_search(
                     "Gain_import_HT_CHF": float(import_avoided_ht * ht_price),
                     "Gain_import_BT_CHF": float(import_avoided_bt * bt_price),
                     "Export_value_lost_CHF": float(export_value_lost),
+                    "Peak_savings_CHF": float(peak_savings_chf),
+                    "Peak_before_kW": float(peak_before_kw),
+                    "Peak_after_kW": float(peak_after_kw),
+                    "Peak_reduction_kW": float(peak_reduction_kw),
+                    "Peak_target_kW": float(peak_target_kW) if peak_active else np.nan,
                     "Import_avoided_kWh": float(discharge_tot),
                     "Import_avoided_HT_kWh": float(import_avoided_ht),
                     "Import_avoided_BT_kWh": float(import_avoided_bt),

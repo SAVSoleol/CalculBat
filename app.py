@@ -420,6 +420,54 @@ show_financial_in_report = st.sidebar.checkbox(
 # 0,5C signifie : puissance maximale = 50 % de la capacité nominale.
 max_c_rate = 0.5 if study_mode in {"pme", "ci"} else None
 
+# Peak Shaving : disponible uniquement en C&I / Industrie.
+peak_shaving_enabled = False
+peak_power_tariff = 0.0
+peak_reserve_pct = 30.0
+peak_grid_recharge = True
+if study_mode == "ci":
+    st.sidebar.markdown("**Peak Shaving**")
+    peak_shaving_enabled = st.sidebar.checkbox(
+        "Activer le Peak Shaving",
+        value=False,
+        key="ci_peak_shaving_enabled",
+        help=(
+            "La batterie réserve une partie de son énergie pour réduire les pointes de puissance réseau. "
+            "Le gain de puissance est ajouté au gain énergétique de l'autoconsommation."
+        ),
+    )
+    if peak_shaving_enabled:
+        peak_power_tariff = st.sidebar.number_input(
+            "Tarif de puissance (CHF/kW/mois)",
+            min_value=0.0,
+            value=10.0,
+            step=0.5,
+            format="%.2f",
+            key="ci_peak_power_tariff",
+            help="Composante mensuelle facturée sur la puissance maximale du mois.",
+        )
+        peak_reserve_pct = st.sidebar.slider(
+            "Réserve batterie pour les pointes (%)",
+            min_value=0,
+            max_value=100,
+            value=30,
+            step=5,
+            key="ci_peak_reserve_pct",
+            help=(
+                "Part de la capacité utile conservée pour le Peak Shaving. "
+                "Cette réserve n'est utilisée que lorsque le seuil réseau est dépassé."
+            ),
+        )
+        peak_grid_recharge = st.sidebar.checkbox(
+            "Maintenir la réserve depuis le réseau",
+            value=True,
+            key="ci_peak_grid_recharge",
+            help=(
+                "Recharge uniquement la réserve Peak Shaving lorsque la puissance réseau est sous le seuil. "
+                "La recharge est limitée pour ne jamais créer une nouvelle pointe ; son coût énergétique est intégré au calcul."
+            ),
+        )
+
 # Rendement aller-retour par défaut selon le type d'étude.
 # L'utilisateur peut ensuite ajuster librement la valeur dans la sidebar.
 roundtrip_default = {
@@ -660,6 +708,26 @@ if exp_tot <= 0:
     st.error(T("dq_no_surplus"))
     st.stop()
 
+# Seuil Peak Shaving calculé à partir de la courbe réelle du site.
+peak_target_kw = None
+measured_peak_kw = float(df.import_kWh.max() / meta.dt_hours) if meta.dt_hours > 0 else 0.0
+if study_mode == "ci" and peak_shaving_enabled:
+    st.sidebar.caption(f"Pointe mesurée : {measured_peak_kw:,.1f} kW".replace(",", " "))
+    default_target = max(0.0, measured_peak_kw * 0.90)
+    peak_target_kw = st.sidebar.number_input(
+        "Seuil réseau cible (kW)",
+        min_value=0.0,
+        max_value=max(measured_peak_kw * 1.5, 1.0),
+        value=float(round(default_target, 1)),
+        step=max(1.0, round(measured_peak_kw * 0.01, 1)),
+        format="%.1f",
+        key="ci_peak_target_kw",
+        help=(
+            "La batterie intervient en priorité lorsque la puissance appelée au réseau dépasse ce seuil. "
+            "Le seuil doit correspondre à l'objectif de puissance facturée du client."
+        ),
+    )
+
 # --------------------------------------------------------------------------- simulate + recommend
 def _best_per_capacity_local(results: pd.DataFrame) -> pd.DataFrame:
     idx = results.groupby("Cap_kWh")["Gain_CHF"].idxmax()
@@ -738,6 +806,11 @@ if auto_cap_max:
                 high_tariff_periods=high_tariff_periods,
                 weekend_low_tariff=weekend_low_tariff,
                 max_c_rate=max_c_rate,
+                peak_shaving_enabled=peak_shaving_enabled,
+                peak_target_kW=peak_target_kw,
+                peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+                peak_reserve_pct=peak_reserve_pct,
+                peak_grid_recharge=peak_grid_recharge,
             )
         cap_max_effective = _auto_capacity_max_from_curve(
             auto_results,
@@ -771,6 +844,11 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
         max_c_rate=max_c_rate,
+        peak_shaving_enabled=peak_shaving_enabled,
+        peak_target_kW=peak_target_kw,
+        peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+        peak_reserve_pct=peak_reserve_pct,
+        peak_grid_recharge=peak_grid_recharge,
     )
     rec_results = grid_search(
         df.import_kWh.values,
@@ -788,6 +866,11 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
         max_c_rate=max_c_rate,
+        peak_shaving_enabled=peak_shaving_enabled,
+        peak_target_kW=peak_target_kw,
+        peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+        peak_reserve_pct=peak_reserve_pct,
+        peak_grid_recharge=peak_grid_recharge,
     )
     rec = recommend(
         rec_results,
@@ -815,6 +898,10 @@ sim = simulate(
     tariff_import_bt=tariff_import_bt,
     high_tariff_periods=high_tariff_periods,
     weekend_low_tariff=weekend_low_tariff,
+    peak_shaving_enabled=peak_shaving_enabled,
+    peak_target_kW=peak_target_kw,
+    peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+    peak_reserve_pct=peak_reserve_pct,
 )
 
 # --------------------------------------------------------------------------- KPI cards
@@ -895,6 +982,30 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+if study_mode == "ci" and peak_shaving_enabled:
+    st.markdown(
+        f"""
+        <div class="mar-card-grid-3">
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">📈</span>Pointe avant batterie</div>
+                <div class="mar-value small mar-orange">{sim.peak_before_kW:.1f} kW</div>
+                <div class="mar-sub">Maximum mesuré sur la période</div>
+            </div>
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">✂️</span>Pointe après batterie</div>
+                <div class="mar-value small mar-green">{sim.peak_after_kW:.1f} kW</div>
+                <div class="mar-sub">Écrêtage : -{sim.peak_reduction_kW:.1f} kW</div>
+            </div>
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">💰</span>Gain Peak Shaving</div>
+                <div class="mar-value small mar-green">{_fmt_chf(sim.peak_savings_chf)} CHF/an</div>
+                <div class="mar-sub">Tarif puissance : {peak_power_tariff:.2f} CHF/kW/mois</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 st.markdown(
     f"""
@@ -1068,12 +1179,40 @@ with st.expander("Détail du gain tarifaire", expanded=False):
             ],
         }
     )
+    if study_mode == "ci" and peak_shaving_enabled:
+        tariff_detail = pd.concat(
+            [
+                tariff_detail,
+                pd.DataFrame(
+                    {
+                        "Poste": ["Peak Shaving - puissance facturée"],
+                        "kWh/an": [f"-{sim.peak_reduction_kW:.1f} kW max"],
+                        "Tarif CHF/kWh": [f"{peak_power_tariff:.2f} CHF/kW/mois"],
+                        "CHF/an": [sim.peak_savings_chf],
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
     st.dataframe(tariff_detail, use_container_width=True, hide_index=True)
     st.caption(
         f"Formule : gain = import évité HT × {tariff_import_ht:.4f} "
         f"+ import évité BT × {tariff_import_bt:.4f} "
         f"- surplus stocké × {tariff_export:.4f}. "
         f"Profil utilisé : {tariff_profile}."
+    )
+
+if study_mode == "ci" and peak_shaving_enabled:
+    recharge_note = (
+        "La réserve peut être maintenue depuis le réseau sans dépasser le seuil. "
+        if peak_grid_recharge
+        else "La batterie est rechargée uniquement par le surplus photovoltaïque. "
+    )
+    st.caption(
+        f"Peak Shaving actif : seuil {peak_target_kw:.1f} kW, réserve {peak_reserve_pct:.0f} %, "
+        f"pointe réduite de {sim.peak_before_kW:.1f} à {sim.peak_after_kW:.1f} kW. "
+        + recharge_note
+        + "Le coût énergétique de la recharge réseau éventuelle est inclus dans le gain net."
     )
 
 # --------------------------------------------------------------------------- energy dashboard
@@ -1306,6 +1445,11 @@ with tab_pay:
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
         max_c_rate=max_c_rate,
+        peak_shaving_enabled=peak_shaving_enabled,
+        peak_target_kW=peak_target_kw,
+        peak_power_tariff_chf_per_kw_month=peak_power_tariff,
+        peak_reserve_pct=peak_reserve_pct,
+        peak_grid_recharge=peak_grid_recharge,
     )
     f = pay_gs.loc[pay_gs.groupby("Cap_kWh")["Gain_CHF"].idxmax()] \
               .sort_values("Cap_kWh").reset_index(drop=True)
