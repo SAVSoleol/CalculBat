@@ -455,29 +455,41 @@ roundtrip_eff = st.sidebar.slider(
     ),
 )
 
+# SOC minimum technique fixe pour toutes les batteries.
+TECHNICAL_SOC_MIN_PCT = 5.0
+
 # Peak Shaving reserve is relevant only for C&I / industrial studies.
-# Residential and PME use the full battery range for autoconsumption.
+# Residential and PME use 5-100 % for autoconsumption.
 if study_mode == "ci":
-    st.sidebar.markdown("**Réserve Peak Shaving**")
-    soc_min_pct = st.sidebar.slider(
-        "Réserve Peak Shaving (%)",
-        min_value=0,
+    st.sidebar.markdown("**Répartition d'utilisation batterie**")
+    reserve_boundary_pct = st.sidebar.slider(
+        "Frontière réserve Peak Shaving (%)",
+        min_value=int(TECHNICAL_SOC_MIN_PCT),
         max_value=80,
         value=30,
         step=5,
-        key="ci_peak_reserve_pct",
+        key="ci_peak_reserve_boundary_pct",
         help=(
-            "Part basse de la batterie réservée au Peak Shaving. "
-            "Exemple : 30 % = zone 0-30 % réservée au Peak Shaving et zone 30-100 % "
-            "utilisée pour le dimensionnement en autoconsommation."
+            "SOC séparant la réserve Peak Shaving de la zone autoconsommation. "
+            "Le SOC technique reste fixé à 5 %. Exemple : frontière 30 % = "
+            "5-30 % pour le Peak Shaving et 30-100 % pour l'autoconsommation."
         ),
     )
+    # Battery Sizer models only the autoconsumption zone, so its effective
+    # lower bound is the Peak Shaving reserve boundary.
+    soc_min_pct = float(reserve_boundary_pct)
     st.sidebar.caption(
-        f"**0-{soc_min_pct:.0f} % : Peak Shaving**  ·  "
-        f"**{soc_min_pct:.0f}-100 % : autoconsommation**"
+        f"**0-{TECHNICAL_SOC_MIN_PCT:.0f} % : réserve technique**  ·  "
+        f"**{TECHNICAL_SOC_MIN_PCT:.0f}-{reserve_boundary_pct:.0f} % : Peak Shaving**  ·  "
+        f"**{reserve_boundary_pct:.0f}-100 % : autoconsommation**"
     )
 else:
-    soc_min_pct = 0.0
+    reserve_boundary_pct = TECHNICAL_SOC_MIN_PCT
+    soc_min_pct = TECHNICAL_SOC_MIN_PCT
+    st.sidebar.caption(
+        f"SOC technique fixe : **{TECHNICAL_SOC_MIN_PCT:.0f} %** · "
+        f"plage autoconsommation : **{TECHNICAL_SOC_MIN_PCT:.0f}-100 %**"
+    )
 
 st.sidebar.markdown(T("search_range"))
 if study_mode in {"pme", "ci"}:
@@ -928,8 +940,10 @@ rec_range_label = (
 )
 
 usable_capacity_best_kwh = float(best.Cap_kWh) * (1.0 - float(soc_min_pct) / 100.0)
-peak_reserve_best_kwh = float(best.Cap_kWh) * float(soc_min_pct) / 100.0
-
+technical_reserve_best_kwh = float(best.Cap_kWh) * TECHNICAL_SOC_MIN_PCT / 100.0
+peak_reserve_best_kwh = (
+    float(best.Cap_kWh) * max(float(reserve_boundary_pct) - TECHNICAL_SOC_MIN_PCT, 0.0) / 100.0
+)
 st.markdown('<div class="mar-summary-title">Résumé de la simulation</div>', unsafe_allow_html=True)
 
 st.markdown(
@@ -968,16 +982,21 @@ st.markdown(
 if study_mode == "ci":
     st.markdown(
         f"""
-        <div class="mar-card-grid-2">
+        <div class="mar-card-grid-3">
+            <div class="mar-card">
+                <div class="mar-label"><span class="mar-icon">🔒</span>Réserve technique</div>
+                <div class="mar-value mar-blue">{technical_reserve_best_kwh:,.0f} kWh</div>
+                <div class="mar-sub">Zone 0-{TECHNICAL_SOC_MIN_PCT:.0f} % · non utilisée</div>
+            </div>
             <div class="mar-card">
                 <div class="mar-label"><span class="mar-icon">🛡️</span>Réserve Peak Shaving</div>
                 <div class="mar-value mar-blue">{peak_reserve_best_kwh:,.0f} kWh</div>
-                <div class="mar-sub">Zone 0-{soc_min_pct:.0f} % réservée aux pointes</div>
+                <div class="mar-sub">Zone {TECHNICAL_SOC_MIN_PCT:.0f}-{reserve_boundary_pct:.0f} % dédiée aux pointes</div>
             </div>
             <div class="mar-card">
                 <div class="mar-label"><span class="mar-icon">🔋</span>Capacité autoconsommation</div>
                 <div class="mar-value mar-blue">{usable_capacity_best_kwh:,.0f} kWh</div>
-                <div class="mar-sub">Zone {soc_min_pct:.0f}-100 % · {100 - soc_min_pct:.0f} % de {best.Cap_kWh:.0f} kWh</div>
+                <div class="mar-sub">Zone {reserve_boundary_pct:.0f}-100 %</div>
             </div>
         </div>
         """.replace(",", " "),
@@ -1438,7 +1457,7 @@ with tab_soc:
         fig.add_hline(
             y=soc_min_pct,
             line_dash="dash",
-            annotation_text=f"Réserve Peak Shaving : {soc_min_pct:.0f} %",
+            annotation_text=f"Frontière Peak Shaving / autoconsommation : {reserve_boundary_pct:.0f} %",
         )
     fig.update_layout(
         yaxis_title=T("axis_soc"),

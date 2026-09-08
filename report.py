@@ -956,13 +956,16 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
     )
 
     if str(study_mode).lower() in {"ci", "c&i", "industrie", "industrial"}:
-        reserve_pct = float(getattr(sim, "soc_min_pct", 0.0) or 0.0)
-        reserve_kwh = float(best.Cap_kWh) * reserve_pct / 100.0
+        technical_soc_pct = 5.0
+        boundary_pct = float(getattr(sim, "soc_min_pct", technical_soc_pct) or technical_soc_pct)
+        technical_kwh = float(best.Cap_kWh) * technical_soc_pct / 100.0
+        reserve_kwh = float(best.Cap_kWh) * max(boundary_pct - technical_soc_pct, 0.0) / 100.0
         battery_text = (
             f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
-            f"Puissance : {best.Power_kW:.0f} kW\n"
-            f"Réserve Peak Shaving : {reserve_pct:.0f} % ({reserve_kwh:.0f} kWh)\n"
-            f"Autoconsommation : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
+            f"Réserve technique 0-5 % : {technical_kwh:.0f} kWh\n"
+            f"Peak Shaving 5-{boundary_pct:.0f} % : {reserve_kwh:.0f} kWh\n"
+            f"Autoconsommation {boundary_pct:.0f}-100 % : "
+            f"{getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
         )
     else:
         battery_text = (
@@ -994,7 +997,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         f"Tarifs : HT {tariff_import_ht:.2f}, BT {tariff_import_bt:.2f}, "
         f"rachat {tariff_export:.2f} CHF/kWh. "
         + (
-            f"Réserve Peak Shaving : {getattr(sim, 'soc_min_pct', 0):.0f} %."
+            f"SOC technique : 5 %. Frontière Peak Shaving : {getattr(sim, 'soc_min_pct', 5):.0f} %."
             if str(study_mode).lower() in {"ci", "c&i", "industrie", "industrial"}
             else "Plage batterie : 0 % -> 100 %."
         ),
