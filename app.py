@@ -420,45 +420,17 @@ show_financial_in_report = st.sidebar.checkbox(
 # 0,5C signifie : puissance maximale = 50 % de la capacité nominale.
 max_c_rate = 0.5 if study_mode in {"pme", "ci"} else None
 
-# Réserve Peak Shaving : disponible uniquement en C&I / Industrie.
-# Battery Sizer calcule uniquement l'autoconsommation avec une réserve protégée.
-# Le gain de puissance en CHF reste dans le Peak Shaving Simulator dédié.
+# Peak Shaving est traité exclusivement dans l'application dédiée
+# "Peak Shaving Simulator". Battery Sizer dimensionne uniquement la batterie
+# selon l'autoconsommation, les flux énergétiques, les tarifs et les cycles.
+# Les paramètres ci-dessous sont conservés uniquement pour compatibilité avec
+# simulation.py et restent toujours désactivés.
 peak_shaving_enabled = False
 peak_power_tariff = 0.0
 peak_billing_mode = "annual_band"
-peak_reserve_pct = 30.0
-peak_grid_recharge = True
-sungrow_st225_preset = False
-sungrow_st225_units = 2
-
-if study_mode == "ci":
-    st.sidebar.markdown("**Réserve Peak Shaving**")
-    peak_shaving_enabled = st.sidebar.checkbox(
-        "Protéger une réserve pour le Peak Shaving",
-        value=False,
-        key="ci_peak_shaving_enabled",
-        help=(
-            "L'autoconsommation ne peut pas utiliser la réserve configurée. "
-            "Le gain Peak Shaving est calculé séparément dans le simulateur dédié."
-        ),
-    )
-    if peak_shaving_enabled:
-        peak_reserve_pct = st.sidebar.slider(
-            "Réserve batterie pour les pointes (%)",
-            min_value=0, max_value=100, value=30, step=5,
-            key="ci_peak_reserve_pct",
-            help="Part de la capacité utile protégée pour le Peak Shaving.",
-        )
-        peak_grid_recharge = st.sidebar.checkbox(
-            "Maintenir la réserve depuis le réseau",
-            value=True,
-            key="ci_peak_grid_recharge",
-            help="Maintient la réserve protégée depuis le réseau lorsque nécessaire.",
-        )
-        st.sidebar.caption(
-            "Le tarif CHF/kW/mois et le gain Peak Shaving sont gérés uniquement "
-            "dans le Peak Shaving Simulator."
-        )
+peak_reserve_pct = 0.0
+peak_grid_recharge = False
+peak_target_kw = None
 
 # Rendement aller-retour par défaut selon le type d'étude.
 # L'utilisateur peut ensuite ajuster librement la valeur dans la sidebar.
@@ -700,12 +672,6 @@ if exp_tot <= 0:
     st.error(T("dq_no_surplus"))
     st.stop()
 
-# Dans Battery Sizer, la réserve est protégée pour l'autoconsommation.
-# Un seuil interne volontairement supérieur à la pointe mesurée empêche le moteur
-# d'utiliser cette réserve pour écrêter les pointes : ce rôle appartient au simulateur dédié.
-measured_peak_kw = float(df.import_kWh.max() / meta.dt_hours) if meta.dt_hours > 0 else 0.0
-peak_target_kw = measured_peak_kw * 2.0 + 1.0 if peak_shaving_enabled else None
-
 # --------------------------------------------------------------------------- simulate + recommend
 def _best_per_capacity_local(results: pd.DataFrame) -> pd.DataFrame:
     idx = results.groupby("Cap_kWh")["Gain_CHF"].idxmax()
@@ -759,13 +725,12 @@ def _auto_capacity_max_from_curve(
 powers = list(range(int(p_min), int(p_max) + 1, int(p_step)))
 cap_max_effective = int(cap_max)
 
-fixed_sungrow_config = False
 
 # Important : la recommandation est calculée sur la plage complète du mode,
 # pas sur Cap.min. Ainsi, déplacer Cap.min ne déplace plus artificiellement le knee point.
 calc_cap_min = int(mode_cap_min)
 
-if auto_cap_max and not fixed_sungrow_config:
+if auto_cap_max:
     auto_limit = int(cap_max)
     auto_caps = list(range(calc_cap_min, auto_limit + 1, int(cap_step)))
     if auto_caps and powers:
@@ -786,12 +751,12 @@ if auto_cap_max and not fixed_sungrow_config:
                 high_tariff_periods=high_tariff_periods,
                 weekend_low_tariff=weekend_low_tariff,
                 max_c_rate=max_c_rate,
-                peak_shaving_enabled=peak_shaving_enabled,
-                peak_target_kW=peak_target_kw,
-                peak_power_tariff_chf_per_kw_month=peak_power_tariff,
-        peak_billing_mode=peak_billing_mode,
-                peak_reserve_pct=peak_reserve_pct,
-                peak_grid_recharge=peak_grid_recharge,
+                peak_shaving_enabled=False,
+                peak_target_kW=None,
+                peak_power_tariff_chf_per_kw_month=0.0,
+        peak_billing_mode="annual_band",
+                peak_reserve_pct=0.0,
+                peak_grid_recharge=False,
             )
         cap_max_effective = _auto_capacity_max_from_curve(
             auto_results,
@@ -800,13 +765,9 @@ if auto_cap_max and not fixed_sungrow_config:
         )
         st.sidebar.caption(f"Cap. max auto utilisée : {cap_max_effective} kWh")
 
-if fixed_sungrow_config:
-    calc_caps = [fixed_cap_kwh]
-    display_caps = [fixed_cap_kwh]
-else:
-    calc_caps = list(range(calc_cap_min, int(cap_max_effective) + 1, int(cap_step)))
-    display_min = max(int(cap_min), calc_cap_min)
-    display_caps = list(range(display_min, int(cap_max_effective) + 1, int(cap_step)))
+calc_caps = list(range(calc_cap_min, int(cap_max_effective) + 1, int(cap_step)))
+display_min = max(int(cap_min), calc_cap_min)
+display_caps = list(range(display_min, int(cap_max_effective) + 1, int(cap_step)))
 
 if not calc_caps or not powers:
     st.error(T("empty_range"))
@@ -829,12 +790,12 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
         max_c_rate=max_c_rate,
-        peak_shaving_enabled=peak_shaving_enabled,
-        peak_target_kW=peak_target_kw,
-        peak_power_tariff_chf_per_kw_month=peak_power_tariff,
-        peak_billing_mode=peak_billing_mode,
-        peak_reserve_pct=peak_reserve_pct,
-        peak_grid_recharge=peak_grid_recharge,
+        peak_shaving_enabled=False,
+        peak_target_kW=None,
+        peak_power_tariff_chf_per_kw_month=0.0,
+        peak_billing_mode="annual_band",
+        peak_reserve_pct=0.0,
+        peak_grid_recharge=False,
     )
     rec_results = grid_search(
         df.import_kWh.values,
@@ -852,12 +813,12 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
         max_c_rate=max_c_rate,
-        peak_shaving_enabled=peak_shaving_enabled,
-        peak_target_kW=peak_target_kw,
-        peak_power_tariff_chf_per_kw_month=peak_power_tariff,
-        peak_billing_mode=peak_billing_mode,
-        peak_reserve_pct=peak_reserve_pct,
-        peak_grid_recharge=peak_grid_recharge,
+        peak_shaving_enabled=False,
+        peak_target_kW=None,
+        peak_power_tariff_chf_per_kw_month=0.0,
+        peak_billing_mode="annual_band",
+        peak_reserve_pct=0.0,
+        peak_grid_recharge=False,
     )
     rec = recommend(
         rec_results,
@@ -885,12 +846,12 @@ sim = simulate(
     tariff_import_bt=tariff_import_bt,
     high_tariff_periods=high_tariff_periods,
     weekend_low_tariff=weekend_low_tariff,
-    peak_shaving_enabled=peak_shaving_enabled,
-    peak_target_kW=peak_target_kw,
-    peak_power_tariff_chf_per_kw_month=peak_power_tariff,
-                peak_billing_mode=peak_billing_mode,
-    peak_reserve_pct=peak_reserve_pct,
-    peak_grid_recharge=peak_grid_recharge,
+    peak_shaving_enabled=False,
+    peak_target_kW=None,
+    peak_power_tariff_chf_per_kw_month=0.0,
+                peak_billing_mode="annual_band",
+    peak_reserve_pct=0.0,
+    peak_grid_recharge=False,
 )
 
 # --------------------------------------------------------------------------- KPI cards
@@ -1152,16 +1113,6 @@ with st.expander("Détail du gain tarifaire", expanded=False):
         f"Profil utilisé : {tariff_profile}."
     )
 
-if study_mode == "ci" and peak_shaving_enabled:
-    reserve_nominal_kwh = float(best.Cap_kWh) * float(peak_reserve_pct) / 100.0
-    st.caption(
-        f"Réserve Peak Shaving protégée : {peak_reserve_pct:.0f}% "
-        f"(environ {reserve_nominal_kwh:.0f} kWh de capacité nominale). "
-        "Cette réserve n'est pas utilisée pour l'autoconsommation. "
-        + ("Elle peut être maintenue depuis le réseau." if peak_grid_recharge
-           else "Elle n'est pas maintenue depuis le réseau.")
-    )
-
 # --------------------------------------------------------------------------- energy dashboard
 st.divider()
 render_energy_dashboard(df, sim, best)
@@ -1375,7 +1326,7 @@ with tab_pay:
     # Two size lenses (notebook §29): whole-system payback (money optimum) + cycles/yr
     # (price-free use proxy). The recommendation is where they agree; each corrects a
     # different misreading of a single money view.
-    pay_caps = [fixed_cap_kwh] if fixed_sungrow_config else list(range(int(mode_cap_min), int(cap_max_effective) + 1, int(cap_step)))
+    pay_caps = list(range(int(mode_cap_min), int(cap_max_effective) + 1, int(cap_step)))
     pay_gs = grid_search(
         df.import_kWh.values,
         df.export_kWh.values,
@@ -1392,12 +1343,12 @@ with tab_pay:
         high_tariff_periods=high_tariff_periods,
         weekend_low_tariff=weekend_low_tariff,
         max_c_rate=max_c_rate,
-        peak_shaving_enabled=peak_shaving_enabled,
-        peak_target_kW=peak_target_kw,
-        peak_power_tariff_chf_per_kw_month=peak_power_tariff,
-        peak_billing_mode=peak_billing_mode,
-        peak_reserve_pct=peak_reserve_pct,
-        peak_grid_recharge=peak_grid_recharge,
+        peak_shaving_enabled=False,
+        peak_target_kW=None,
+        peak_power_tariff_chf_per_kw_month=0.0,
+        peak_billing_mode="annual_band",
+        peak_reserve_pct=0.0,
+        peak_grid_recharge=False,
     )
     f = pay_gs.loc[pay_gs.groupby("Cap_kWh")["Gain_CHF"].idxmax()] \
               .sort_values("Cap_kWh").reset_index(drop=True)

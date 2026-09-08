@@ -17,6 +17,7 @@ Cycle definition:
 
 from __future__ import annotations
 
+# NOTE: Battery Sizer n'active plus le Peak Shaving. Les paramètres et fonctions\n# Peak Shaving restent dans ce moteur uniquement pour compatibilité technique et\n# réutilisation éventuelle par d'autres outils. L'étude Peak Shaving se fait dans\n# l'application dédiée Peak Shaving Simulator.\n\n
 from dataclasses import dataclass
 from typing import Iterable
 
