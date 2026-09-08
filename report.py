@@ -958,7 +958,7 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
     battery_text = (
         f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
         f"Puissance : {best.Power_kW:.0f} kW\n"
-        f"Cycles équivalents : {best.Cycles_per_year:.0f} cycles/an\n"
+        f"Plage SOC : {getattr(sim, 'soc_min_pct', 0):.0f} % -> 100 %\n"
         f"Capacité utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
     )
     if bool(getattr(sim, "peak_shaving_enabled", False)):
@@ -982,7 +982,8 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         f"Profil GRD : {tariff_profile} | Pas de temps : {meta.dt_hours * 60:.0f} min | "
         f"Couverture : {meta.coverage_days:.0f} jours\n"
         f"Tarifs : HT {tariff_import_ht:.2f}, BT {tariff_import_bt:.2f}, "
-        f"rachat {tariff_export:.2f} CHF/kWh.",
+        f"rachat {tariff_export:.2f} CHF/kWh. "
+        f"Plage SOC : {getattr(sim, 'soc_min_pct', 0):.0f} % -> 100 %.",
         fill=LIGHT_ORANGE,
         border=SOLEOL_ORANGE,
     )

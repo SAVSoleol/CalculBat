@@ -70,7 +70,8 @@ st.markdown(
         gap: 14px;
         margin-bottom: 14px;
     }
-    .mar-card-grid-3 {
+    .mar-card-grid-2 {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:12px;}
+.mar-card-grid-3 {
         display: grid;
         grid-template-columns: repeat(3, minmax(220px, 1fr));
         gap: 12px;
@@ -454,6 +455,24 @@ roundtrip_eff = st.sidebar.slider(
     ),
 )
 
+st.sidebar.markdown("**Plage d'utilisation batterie**")
+soc_min_pct = st.sidebar.slider(
+    "SOC minimum (%)",
+    min_value=0,
+    max_value=90,
+    value=10,
+    step=5,
+    key=f"soc_min_{study_mode}",
+    help=(
+        "SOC minimum autorisé pour la batterie. Le SOC maximum reste fixé à 100 %. "
+        "Exemple : SOC minimum 20 % = plage d'utilisation de 20 à 100 %."
+    ),
+)
+st.sidebar.caption(
+    f"Plage d'utilisation : **{soc_min_pct:.0f} % → 100 %** "
+    f"(capacité utile = {100 - soc_min_pct:.0f} % de la capacité nominale)."
+)
+
 st.sidebar.markdown(T("search_range"))
 if study_mode in {"pme", "ci"}:
     st.sidebar.caption(
@@ -745,6 +764,7 @@ if auto_cap_max:
                 tariff_import,
                 tariff_export,
                 meta.coverage_days,
+                soc_min_pct=soc_min_pct,
                 timestamps=df.timestamp.values,
                 tariff_import_ht=tariff_import_ht,
                 tariff_import_bt=tariff_import_bt,
@@ -784,6 +804,7 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         tariff_import,
         tariff_export,
         meta.coverage_days,
+        soc_min_pct=soc_min_pct,
         timestamps=df.timestamp.values,
         tariff_import_ht=tariff_import_ht,
         tariff_import_bt=tariff_import_bt,
@@ -807,6 +828,7 @@ with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
         tariff_import,
         tariff_export,
         meta.coverage_days,
+        soc_min_pct=soc_min_pct,
         timestamps=df.timestamp.values,
         tariff_import_ht=tariff_import_ht,
         tariff_import_bt=tariff_import_bt,
@@ -841,6 +863,7 @@ sim = simulate(
     tariff_import,
     tariff_export,
     meta.coverage_days,
+    soc_min_pct=soc_min_pct,
     timestamps=df.timestamp.values,
     tariff_import_ht=tariff_import_ht,
     tariff_import_bt=tariff_import_bt,
@@ -898,6 +921,8 @@ rec_range_label = (
     else f"{best.Cap_kWh:.0f} kWh"
 )
 
+usable_capacity_best_kwh = float(best.Cap_kWh) * (1.0 - float(soc_min_pct) / 100.0)
+
 st.markdown('<div class="mar-summary-title">Résumé de la simulation</div>', unsafe_allow_html=True)
 
 st.markdown(
@@ -930,6 +955,24 @@ st.markdown(
         </div>
     </div>
     """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    f"""
+    <div class="mar-card-grid-2">
+        <div class="mar-card">
+            <div class="mar-label"><span class="mar-icon">🔋</span>Plage d'utilisation</div>
+            <div class="mar-value mar-blue">{soc_min_pct:.0f} % → 100 %</div>
+            <div class="mar-sub">SOC minimum réglable · SOC maximum fixe</div>
+        </div>
+        <div class="mar-card">
+            <div class="mar-label"><span class="mar-icon">⚡</span>Capacité utile</div>
+            <div class="mar-value mar-green">{usable_capacity_best_kwh:,.0f} kWh</div>
+            <div class="mar-sub">{100 - soc_min_pct:.0f} % de {best.Cap_kWh:.0f} kWh nominaux</div>
+        </div>
+    </div>
+    """.replace(",", " "),
     unsafe_allow_html=True,
 )
 
@@ -1337,6 +1380,7 @@ with tab_pay:
         tariff_import,
         tariff_export,
         meta.coverage_days,
+        soc_min_pct=soc_min_pct,
         timestamps=df.timestamp.values,
         tariff_import_ht=tariff_import_ht,
         tariff_import_bt=tariff_import_bt,
