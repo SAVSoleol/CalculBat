@@ -450,7 +450,9 @@ def simulate(
         ),
     )
 
-    gain = gain_import - export_value_lost + peak_savings_chf
+    # Battery Sizer: energy/autoconsumption gain only. Peak-Shaving CHF is calculated in the dedicated simulator.
+    peak_savings_chf = 0.0
+    gain = gain_import - export_value_lost
 
     gain_ht = float(import_avoided_ht * (tariff_import_ht if tariff_import_ht is not None else tariff_import))
     gain_bt = float(import_avoided_bt * (tariff_import_bt if tariff_import_bt is not None else tariff_import))
@@ -608,7 +610,9 @@ def grid_search(
                 ),
             )
 
-            gain = gain_import - export_value_lost + peak_savings_chf
+            # Battery Sizer recommendation must not be influenced by Peak-Shaving CHF.
+            peak_savings_chf = 0.0
+            gain = gain_import - export_value_lost
 
             cycles_year = (
                 discharge_tot / usable_cap * 365.0 / days
