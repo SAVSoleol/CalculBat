@@ -928,7 +928,7 @@ def _page_2(pdf, df, meta, rec, best, big, sim):
     pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'énergie achetée au réseau qui peut etre evitée selon la capacité batterie. Les deux courbes mensuelles separent l'effet de la batterie sur l'import et sur l'export réseau."))
 
 
-def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export):
+def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export, study_mode="residential"):
     pdf.add_page()
     pdf.set_font("Arial", "B", 15)
     pdf.set_text_color(*SOLEOL_ORANGE)
@@ -955,12 +955,22 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         border=BLUE,
     )
 
-    battery_text = (
-        f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
-        f"Puissance : {best.Power_kW:.0f} kW\n"
-        f"Plage SOC : {getattr(sim, 'soc_min_pct', 0):.0f} % -> 100 %\n"
-        f"Capacité utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
-    )
+    if str(study_mode).lower() in {"ci", "c&i", "industrie", "industrial"}:
+        reserve_pct = float(getattr(sim, "soc_min_pct", 0.0) or 0.0)
+        reserve_kwh = float(best.Cap_kWh) * reserve_pct / 100.0
+        battery_text = (
+            f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
+            f"Puissance : {best.Power_kW:.0f} kW\n"
+            f"Réserve Peak Shaving : {reserve_pct:.0f} % ({reserve_kwh:.0f} kWh)\n"
+            f"Autoconsommation : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
+        )
+    else:
+        battery_text = (
+            f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
+            f"Puissance : {best.Power_kW:.0f} kW\n"
+            f"Cycles équivalents : {best.Cycles_per_year:.0f} cycles/an\n"
+            f"Capacité utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
+        )
     if bool(getattr(sim, "peak_shaving_enabled", False)):
         battery_text += (
             f"\nRéserve Peak Shaving protégée : "
@@ -983,7 +993,11 @@ def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_i
         f"Couverture : {meta.coverage_days:.0f} jours\n"
         f"Tarifs : HT {tariff_import_ht:.2f}, BT {tariff_import_bt:.2f}, "
         f"rachat {tariff_export:.2f} CHF/kWh. "
-        f"Plage SOC : {getattr(sim, 'soc_min_pct', 0):.0f} % -> 100 %.",
+        + (
+            f"Réserve Peak Shaving : {getattr(sim, 'soc_min_pct', 0):.0f} %."
+            if str(study_mode).lower() in {"ci", "c&i", "industrie", "industrial"}
+            else "Plage batterie : 0 % -> 100 %."
+        ),
         fill=LIGHT_ORANGE,
         border=SOLEOL_ORANGE,
     )
@@ -1048,6 +1062,10 @@ def generate_battery_report(
         logo_path=logo_path,
     )
     _page_2(pdf, df, meta, rec, best, big, sim)
-    _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export)
+    _page_3(
+        pdf, df, meta, best, sim, tariff_profile,
+        tariff_import_ht, tariff_import_bt, tariff_export,
+        study_mode=study_mode,
+    )
 
     return _pdf_bytes(pdf)

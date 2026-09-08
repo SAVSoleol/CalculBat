@@ -455,23 +455,29 @@ roundtrip_eff = st.sidebar.slider(
     ),
 )
 
-st.sidebar.markdown("**Plage d'utilisation batterie**")
-soc_min_pct = st.sidebar.slider(
-    "SOC minimum (%)",
-    min_value=0,
-    max_value=90,
-    value=10,
-    step=5,
-    key=f"soc_min_{study_mode}",
-    help=(
-        "SOC minimum autorisé pour la batterie. Le SOC maximum reste fixé à 100 %. "
-        "Exemple : SOC minimum 20 % = plage d'utilisation de 20 à 100 %."
-    ),
-)
-st.sidebar.caption(
-    f"Plage d'utilisation : **{soc_min_pct:.0f} % → 100 %** "
-    f"(capacité utile = {100 - soc_min_pct:.0f} % de la capacité nominale)."
-)
+# Peak Shaving reserve is relevant only for C&I / industrial studies.
+# Residential and PME use the full battery range for autoconsumption.
+if study_mode == "ci":
+    st.sidebar.markdown("**Réserve Peak Shaving**")
+    soc_min_pct = st.sidebar.slider(
+        "Réserve Peak Shaving (%)",
+        min_value=0,
+        max_value=80,
+        value=30,
+        step=5,
+        key="ci_peak_reserve_pct",
+        help=(
+            "Part basse de la batterie réservée au Peak Shaving. "
+            "Exemple : 30 % = zone 0-30 % réservée au Peak Shaving et zone 30-100 % "
+            "utilisée pour le dimensionnement en autoconsommation."
+        ),
+    )
+    st.sidebar.caption(
+        f"**0-{soc_min_pct:.0f} % : Peak Shaving**  ·  "
+        f"**{soc_min_pct:.0f}-100 % : autoconsommation**"
+    )
+else:
+    soc_min_pct = 0.0
 
 st.sidebar.markdown(T("search_range"))
 if study_mode in {"pme", "ci"}:
@@ -922,6 +928,7 @@ rec_range_label = (
 )
 
 usable_capacity_best_kwh = float(best.Cap_kWh) * (1.0 - float(soc_min_pct) / 100.0)
+peak_reserve_best_kwh = float(best.Cap_kWh) * float(soc_min_pct) / 100.0
 
 st.markdown('<div class="mar-summary-title">Résumé de la simulation</div>', unsafe_allow_html=True)
 
@@ -958,23 +965,24 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    f"""
-    <div class="mar-card-grid-2">
-        <div class="mar-card">
-            <div class="mar-label"><span class="mar-icon">🔋</span>Plage d'utilisation</div>
-            <div class="mar-value mar-blue">{soc_min_pct:.0f} % → 100 %</div>
-            <div class="mar-sub">SOC minimum réglable · SOC maximum fixe</div>
+if study_mode == "ci":
+    st.markdown(
+        f"""
+        <div class="mar-card-grid-2">
+            <div class="mar-card">
+                <div class="mar-label"><span class="mar-icon">🛡️</span>Réserve Peak Shaving</div>
+                <div class="mar-value mar-blue">{peak_reserve_best_kwh:,.0f} kWh</div>
+                <div class="mar-sub">Zone 0-{soc_min_pct:.0f} % réservée aux pointes</div>
+            </div>
+            <div class="mar-card">
+                <div class="mar-label"><span class="mar-icon">🔋</span>Capacité autoconsommation</div>
+                <div class="mar-value mar-blue">{usable_capacity_best_kwh:,.0f} kWh</div>
+                <div class="mar-sub">Zone {soc_min_pct:.0f}-100 % · {100 - soc_min_pct:.0f} % de {best.Cap_kWh:.0f} kWh</div>
+            </div>
         </div>
-        <div class="mar-card">
-            <div class="mar-label"><span class="mar-icon">⚡</span>Capacité utile</div>
-            <div class="mar-value mar-green">{usable_capacity_best_kwh:,.0f} kWh</div>
-            <div class="mar-sub">{100 - soc_min_pct:.0f} % de {best.Cap_kWh:.0f} kWh nominaux</div>
-        </div>
-    </div>
-    """.replace(",", " "),
-    unsafe_allow_html=True,
-)
+        """.replace(",", " "),
+        unsafe_allow_html=True,
+    )
 
 st.markdown(
     f"""
@@ -1426,8 +1434,19 @@ with tab_soc:
     soc_min = getattr(sim, "soc_min_pct", 0.0)
     soc_pct = soc_min + (sim.soc / usable_cap * (100.0 - soc_min)) if usable_cap > 0 else sim.soc * 0
     fig = go.Figure(go.Scatter(x=ts, y=soc_pct, mode="lines", line=dict(color="#7c3aed", width=1)))
-    fig.update_layout(yaxis_title=T("axis_soc"), xaxis_title=T("axis_date"), height=420,
-                      title=T("soc_title", cap=f"{best.Cap_kWh:.0f}", power=f"{best.Power_kW:.0f}"))
+    if study_mode == "ci" and soc_min_pct > 0:
+        fig.add_hline(
+            y=soc_min_pct,
+            line_dash="dash",
+            annotation_text=f"Réserve Peak Shaving : {soc_min_pct:.0f} %",
+        )
+    fig.update_layout(
+        yaxis_title=T("axis_soc"),
+        xaxis_title=T("axis_date"),
+        yaxis=dict(range=[0, 100]),
+        height=420,
+        title=T("soc_title", cap=f"{best.Cap_kWh:.0f}", power=f"{best.Power_kW:.0f}"),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 with tab_cyc:
