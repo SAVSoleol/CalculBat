@@ -1,44 +1,31 @@
-"""Battery Sizer, Streamlit dashboard.
+"""Interface française du calculateur de batterie.
 
-Pipeline:  upload meter file(s) -> loaders.normalize -> simulation.grid_search
-           -> recommend -> dashboard + PDF.
-
-UI is displayed in French via i18n.t; recommend.py emits language-neutral
-(code, params) messages rendered here with i18n.msg.
-
-See PROJECT_NOTES.md for the full design rationale.
+Lancement : python -m streamlit run app.py
+Une grille physique en cache alimente tous les graphiques et le dimensionnement.
 """
-
 from __future__ import annotations
-
-import tempfile
-from io import BytesIO
+from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
+import tempfile
+from zipfile import ZipFile
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
-from fpdf import FPDF
 
-from i18n import ERROR_CODES, LANGS, msg, t
-from loaders import UnsupportedFormatError, _finalize, load_meter_file
-from recommend import BRANDS, recommend
-from simulation import grid_search, simulate
-from report import generate_battery_report
-from grd_profiles import GRD_PROFILES
+from loaders import load_meter_files, prepare_simulation_data, UnsupportedFormatError
+from simulation import grid_search, simulate, simple_payback, HAS_NUMBA
+from recommend import MODE_SETTINGS, fixed_grid, recommend
+from grd_profiles import GRD_PROFILES, get_profile, parse_periods
+from i18n import t, msg, recommendation_messages, study_assumptions
 from energy_dashboard import render_energy_dashboard
+from report import generate_battery_report, SECTION_LABELS, monthly_before_after
 
-st.set_page_config(page_title="Calculateur de batterie", layout="wide", page_icon="🔋")
 
-
-st.markdown(
-    """
+ORIGINAL_CSS = """
     <style>
     :root {
         --card-bg: rgba(17, 24, 39, 0.72);
@@ -175,904 +162,367 @@ st.markdown(
         }
     }
     </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# --------------------------------------------------------------------------- language
-# Interface volontairement fixée en français : aucun choix de langue n'est affiché.
-L = LANGS["Français"]
-
-
-def T(key: str, **fmt) -> str:
-    return t(L, key, **fmt)
-
-
-# --------------------------------------------------------------------------- sidebar
-# Every stateful widget gets a stable key= so its value survives Streamlit reruns.
-st.sidebar.header(T("settings_header"))
-
-client_name = st.sidebar.text_input(
-    "Nom du client",
-    value="",
-    key="client_name",
-    placeholder="Ex. Jean Dupont",
-    help="Ce nom apparaîtra dans le bandeau noir du rapport PDF.",
-)
-
-# Marque batterie masquée pour l'instant.
-# Le moteur garde GoodWe comme référence interne pour les seuils techniques,
-# mais l'utilisateur ne voit plus le choix de marque ni les sources cycles.
-brand = BRANDS["goodwe"]
-
-st.sidebar.markdown("**Données**")
-unit_choice = st.sidebar.selectbox(
-    "Unité des données import/export",
-    ["Automatique", "kWh", "kW", "Wh", "W"],
-    index=0,
-    key="data_unit",
-    help=(
-        "Automatique utilise l'unité détectée selon le fichier. "
-        "Choisir kW/W si les colonnes sont des puissances moyennes par intervalle ; "
-        "choisir kWh/Wh si les colonnes sont déjà des énergies par intervalle."
-    ),
-)
-loader_unit = "auto" if unit_choice == "Automatique" else unit_choice
-st.sidebar.caption(
-    "kW/W = puissance moyenne convertie en kWh avec le pas de temps détecté. "
-    "kWh/Wh = énergie déjà mesurée par intervalle."
-)
-
-st.sidebar.markdown("**Tarifs énergie**")
-
-tariff_profiles = GRD_PROFILES
-
-
-tariff_profile_names = list(tariff_profiles)
-tariff_profile = st.sidebar.selectbox(
-    "Profil tarifaire GRD",
-    tariff_profile_names,
-    index=tariff_profile_names.index("Groupe E") if "Groupe E" in tariff_profile_names else 0,
-    key="tariff_profile",
-)
-profile = tariff_profiles[tariff_profile]
-
-if profile.get("needs_verification", False):
-    st.sidebar.warning(
-        "Tarifs préremplis à vérifier : renseigne les valeurs exactes du contrat client "
-        "ou mets à jour grd_profiles.py."
-    )
-
-manual_tariffs = st.sidebar.checkbox(
-    "Modifier manuellement les tarifs",
-    value=True,
-    key=f"manual_tariffs_{tariff_profile}",
-)
-
-single_tariff = bool(profile.get("single_tariff", False))
-
-if single_tariff:
-    tariff_import_unique = st.sidebar.number_input(
-        "Tarif achat unique (CHF/kWh)",
-        value=float(profile["ht"]),
-        step=0.001,
-        format="%.4f",
-        key=f"tariff_import_unique_{tariff_profile}",
-        disabled=not manual_tariffs,
-        help="Tarif d'achat identique toute l'année, 24h/24.",
-    )
-    tariff_import_ht = float(tariff_import_unique)
-    tariff_import_bt = float(tariff_import_unique)
-else:
-    tariff_import_ht = st.sidebar.number_input(
-        "Tarif achat haut tarif (CHF/kWh)",
-        value=float(profile["ht"]),
-        step=0.001,
-        format="%.4f",
-        key=f"tariff_import_ht_{tariff_profile}",
-        disabled=not manual_tariffs,
-    )
-
-    tariff_import_bt = st.sidebar.number_input(
-        "Tarif achat bas tarif (CHF/kWh)",
-        value=float(profile["bt"]),
-        step=0.001,
-        format="%.4f",
-        key=f"tariff_import_bt_{tariff_profile}",
-        disabled=not manual_tariffs,
-    )
-
-tariff_export = st.sidebar.number_input(
-    "Tarif rachat / revente (CHF/kWh)",
-    value=float(profile["export"]),
-    step=0.001,
-    format="%.4f",
-    key=f"tariff_export_{tariff_profile}",
-    disabled=not manual_tariffs,
-)
-
-if single_tariff:
-    high_tariff_periods = ()
-    weekend_low_tariff = False
-    with st.sidebar.expander("Tarif unique 24h/24", expanded=False):
-        st.caption(profile["description"])
-        st.caption(f"Source / note : {profile.get('source', 'à vérifier')}")
-elif tariff_profile == "Personnalise":
-    with st.sidebar.expander("Plages haut tarif personnalisées", expanded=True):
-        ht1_start = st.number_input("HT 1 début", 0.0, 24.0, 7.0, step=0.5, format="%.1f", key="custom_ht1_start")
-        ht1_end = st.number_input("HT 1 fin", 0.0, 24.0, 12.0, step=0.5, format="%.1f", key="custom_ht1_end")
-        use_ht2 = st.checkbox("Ajouter une 2e plage HT", value=True, key="custom_use_ht2")
-        if use_ht2:
-            ht2_start = st.number_input("HT 2 début", 0.0, 24.0, 17.0, step=0.5, format="%.1f", key="custom_ht2_start")
-            ht2_end = st.number_input("HT 2 fin", 0.0, 24.0, 23.0, step=0.5, format="%.1f", key="custom_ht2_end")
-            high_tariff_periods = ((float(ht1_start), float(ht1_end)), (float(ht2_start), float(ht2_end)))
-        else:
-            high_tariff_periods = ((float(ht1_start), float(ht1_end)),)
-
-        weekend_low_tariff = st.checkbox(
-            "Week-end entièrement en bas tarif",
-            value=False,
-            key="custom_weekend_low_tariff",
-        )
-else:
-    with st.sidebar.expander(f"Plages tarifaires {tariff_profile}", expanded=False):
-        st.caption(profile["description"])
-        st.caption(f"Source / note : {profile.get('source', 'à vérifier')}")
-    high_tariff_periods = profile["periods"]
-    weekend_low_tariff = bool(profile["weekend_low"])
-
-tariff_import = tariff_import_ht  # compatibilité avec les anciens textes/graphes
-
-# Coûts batterie masqués : le dimensionnement principal utilise uniquement
-# les flux import/export et les tarifs HT/BT/rachat.
-# Ces valeurs restent définies pour ne pas casser les anciens graphiques/PDF.
-cost_price_lo = 600
-cost_price_hi = 1000
-cost_fixed = 4000
-cost_life = 13
-
-st.sidebar.markdown("**Type d'étude**")
-study_mode_label = st.sidebar.radio(
-    "Mode",
-    [
-        "Autoconsommation résidentielle (5-50 kWh)",
-        "PME (50-150 kWh)",
-        "C&I / Industrie (150-1000 kWh)",
-    ],
-    index=0,
-    key="study_mode_label",
-)
-
-if study_mode_label.startswith("Autoconsommation résidentielle"):
-    study_mode = "residential"
-    mode_cap_min, mode_cap_max, mode_cap_step = 5, 50, 1
-    mode_p_min, mode_p_max, mode_p_step = 1, 20, 1
-    cycles_low = 250.0  # seuil technique interne, non réglable
-    mode_rec_label = "Compromis économie, usage et autoconsommation"
-elif study_mode_label.startswith("PME"):
-    study_mode = "pme"
-    mode_cap_min, mode_cap_max, mode_cap_step = 50, 150, 5
-    mode_p_min, mode_p_max, mode_p_step = 5, 100, 5
-    cycles_low = 220.0  # seuil technique interne, non réglable
-    mode_rec_label = "Compromis économie, usage et autoconsommation"
-else:
-    study_mode = "ci"
-    mode_cap_min, mode_cap_max, mode_cap_step = 150, 1000, 10
-    mode_p_min, mode_p_max, mode_p_step = 20, 500, 10
-    cycles_low = 200.0  # seuil technique interne, non réglable
-    mode_rec_label = "Saturation économique C&I"
-
-# Option visible immédiatement sous le type d'étude.
-show_financial_in_report = st.sidebar.checkbox(
-    "Afficher l'économie financière dans le rapport PDF",
-    value=(study_mode == "ci"),
-    key=f"show_financial_report_{study_mode}",
-    help=(
-        "Ajoute ou masque le bloc d'économie annuelle sur la page 1 du rapport PDF. "
-        "Disponible pour Résidentiel, PME et C&I."
-    ),
-)
-
-# Contrainte de puissance pour les batteries PME et C&I.
-# 0,5C signifie : puissance maximale = 50 % de la capacité nominale.
-max_c_rate = 0.5 if study_mode in {"pme", "ci"} else None
-
-# Peak Shaving est traité exclusivement dans l'application dédiée
-# "Peak Shaving Simulator". Battery Sizer dimensionne uniquement la batterie
-# selon l'autoconsommation, les flux énergétiques, les tarifs et les cycles.
-# Les paramètres ci-dessous sont conservés uniquement pour compatibilité avec
-# simulation.py et restent toujours désactivés.
-peak_shaving_enabled = False
-peak_power_tariff = 0.0
-peak_billing_mode = "annual_band"
-peak_reserve_pct = 0.0
-peak_grid_recharge = False
-peak_target_kw = None
-
-# Rendement aller-retour par défaut selon le type d'étude.
-# L'utilisateur peut ensuite ajuster librement la valeur dans la sidebar.
-roundtrip_default = {
-    "residential": 0.92,
-    "pme": 0.88,
-    "ci": 0.80,
-}[study_mode]
-
-roundtrip_eff = st.sidebar.slider(
-    T("roundtrip"),
-    min_value=0.50,
-    max_value=1.00,
-    value=roundtrip_default,
-    step=0.01,
-    key=f"roundtrip_{study_mode}",
-    help=(
-        "Rendement aller-retour du système batterie. Valeurs par défaut : "
-        "92 % en résidentiel, 88 % en PME et 80 % en C&I / Industrie. "
-        "La valeur reste modifiable selon l'architecture et la fiche technique du système."
-    ),
-)
-
-# SOC minimum technique fixe pour toutes les batteries.
-TECHNICAL_SOC_MIN_PCT = 5.0
-
-# Peak Shaving reserve is relevant only for C&I / industrial studies.
-# Residential and PME use 5-100 % for autoconsumption.
-if study_mode == "ci":
-    st.sidebar.markdown("**Répartition d'utilisation batterie**")
-    reserve_boundary_pct = st.sidebar.slider(
-        "Frontière réserve Peak Shaving (%)",
-        min_value=int(TECHNICAL_SOC_MIN_PCT),
-        max_value=80,
-        value=30,
-        step=5,
-        key="ci_peak_reserve_boundary_pct",
-        help=(
-            "SOC séparant la réserve Peak Shaving de la zone autoconsommation. "
-            "Le SOC technique reste fixé à 5 %. Exemple : frontière 30 % = "
-            "5-30 % pour le Peak Shaving et 30-100 % pour l'autoconsommation."
-        ),
-    )
-    # Battery Sizer models only the autoconsumption zone, so its effective
-    # lower bound is the Peak Shaving reserve boundary.
-    soc_min_pct = float(reserve_boundary_pct)
-    st.sidebar.caption(
-        f"**0-{TECHNICAL_SOC_MIN_PCT:.0f} % : réserve technique**  ·  "
-        f"**{TECHNICAL_SOC_MIN_PCT:.0f}-{reserve_boundary_pct:.0f} % : Peak Shaving**  ·  "
-        f"**{reserve_boundary_pct:.0f}-100 % : autoconsommation**"
-    )
-else:
-    reserve_boundary_pct = TECHNICAL_SOC_MIN_PCT
-    soc_min_pct = TECHNICAL_SOC_MIN_PCT
-    st.sidebar.caption(
-        f"SOC technique fixe : **{TECHNICAL_SOC_MIN_PCT:.0f} %** · "
-        f"plage autoconsommation : **{TECHNICAL_SOC_MIN_PCT:.0f}-100 %**"
-    )
-
-st.sidebar.markdown(T("search_range"))
-if study_mode in {"pme", "ci"}:
-    st.sidebar.caption(
-        "Contrainte batterie active : 0,5C → puissance maximale = 50 % de la capacité."
-    )
-st.sidebar.caption(
-    "La recommandation est calculée sur toute la plage du mode. "
-    "Cap. min/max servent à explorer ou limiter l'affichage, sans déplacer artificiellement le résultat."
-)
-c1, c2 = st.sidebar.columns(2)
-cap_min = c1.number_input(
-    T("cap_min"), mode_cap_min, mode_cap_max, mode_cap_min,
-    step=mode_cap_step, key=f"cap_min_{study_mode}",
-)
-cap_max = c2.number_input(
-    T("cap_max"), mode_cap_min, mode_cap_max, mode_cap_max,
-    step=mode_cap_step, key=f"cap_max_{study_mode}",
-)
-auto_cap_max = st.sidebar.checkbox(
-    "Cap. max automatique",
-    value=True,
-    key=f"auto_cap_max_{study_mode}",
-    help=(
-        "Calcule automatiquement une limite de recherche suffisante pour atteindre le plateau "
-        "de gain. La valeur Cap. max sert alors de limite de sécurité."
-    ),
-)
-p_min = c1.number_input(
-    T("p_min"), mode_p_min, mode_p_max, mode_p_min,
-    step=mode_p_step, key=f"p_min_{study_mode}",
-)
-p_max = c2.number_input(
-    T("p_max"), mode_p_min, mode_p_max, mode_p_max,
-    step=mode_p_step, key=f"p_max_{study_mode}",
-)
-cap_step = c1.number_input(
-    T("cap_step"), 1, max(1, mode_cap_max - mode_cap_min), mode_cap_step,
-    key=f"cap_step_{study_mode}",
-)
-p_step = c2.number_input(
-    T("p_step"), 1, max(1, mode_p_max - mode_p_min), mode_p_step,
-    key=f"p_step_{study_mode}",
-)
-
-# Seuil technique interne : il n'est plus exposé dans l'interface.
-# Les cycles restent un contrôle de surdimensionnement, pas un réglage commercial.
-if study_mode == "residential":
-    min_cycles_per_year = 150.0
-elif study_mode == "pme":
-    min_cycles_per_year = 130.0
-else:
-    min_cycles_per_year = 100.0
-
-
-# PDF report sections: let the installer choose which charts go into the client's PDF, so a
-# tailored report can be sent. Keys map to the on-screen tabs; the summary table is always in.
-PDF_SECTIONS = ["frontier", "payback", "soc", "cycles", "ba"]
-_PDF_SEC_LABEL = {"frontier": "tab_front", "payback": "tab_pay", "soc": "tab_soc",
-                  "cycles": "tab_cyc", "ba": "tab_ba"}
-with st.sidebar.expander(T("pdf_sections_header")):
-    pdf_sections = st.multiselect(
-        T("pdf_sections_label"), PDF_SECTIONS, default=PDF_SECTIONS,
-        format_func=lambda k: T(_PDF_SEC_LABEL[k]), key="pdf_sections",
-    )
-    st.caption(T("pdf_sections_hint"))
-
-# --------------------------------------------------------------------------- header
-st.title("🔋 Calculateur V2")
-st.caption(T("app_caption"))
-
-uploaded = st.file_uploader(
-    T("uploader"),
-    type=["xlsx", "xls", "csv"],
-    accept_multiple_files=True,
-    key="uploader",  # stable key -> files survive Streamlit reruns
-)
-
-if not uploaded:
-    st.info(T("drop_prompt"))
-    st.stop()
-
-
-# --------------------------------------------------------------------------- load
-@st.cache_data(show_spinner=False)
-def _load_one(name: str, data: bytes, data_unit: str):
-    """Normalize a single uploaded file. Cached by (name, bytes, data_unit)."""
-    with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / name
-        p.write_bytes(data)
-        return load_meter_file(p, data_unit=data_unit)
-
-
-def _combine(items: dict):
-    """Concatenate several already-normalized files into one series (e.g. 12 Huawei months)."""
-    frames = [d for d, _ in items.values()]
-    vendors = {m.vendor for _, m in items.values()}
-    vendor = next(iter(vendors)) if len(vendors) == 1 else "mixed(" + ",".join(sorted(vendors)) + ")"
-    sources = "; ".join(m.source for _, m in items.values())
-    return _finalize(pd.concat(frames, ignore_index=True), vendor, sources, data_unit="kWh", default_unit="kWh")
-
-
-# Load each file on its own so one bad file doesn't sink the batch, and so the user can
-# pick which file to analyze instead of always getting everything merged together.
-loaded: dict = {}
-skipped: list[tuple[str, str]] = []
-with st.spinner(T("spinner_load")):
-    for f in uploaded:
-        try:
-            loaded[f.name] = _load_one(f.name, f.getvalue(), loader_unit)
-        except Exception as e:  # UnsupportedFormatError or any parse failure -> report per file
-            skipped.append((f.name, str(e)))
-
-if not loaded:
-    for name, reason in skipped:
-        st.error(T("file_skipped", name=name, reason=reason))
-    st.error(T("no_valid_files"))
-    st.stop()
-
-# Dataset selector: combine everything (default, the 12-Huawei-months case) or one file.
-options = ["__ALL__"] + list(loaded)
-choice = st.sidebar.selectbox(
-    T("data_select_header"), options, key="dataset",
-    format_func=lambda o: T("combine_all", n=len(loaded)) if o == "__ALL__" else o,
-)
-if choice in loaded:
-    df, meta = loaded[choice]
-    active_label = choice
-else:  # "__ALL__" (or a stale key after files changed) -> combine
-    df, meta = _combine(loaded)
-    active_label = T("combine_all", n=len(loaded))
-
-if df.empty:
-    st.error(T("no_data"))
-    st.stop()
-
-st.caption(T("active_dataset", name=active_label))
-st.caption(f"Unité appliquée aux données : **{getattr(meta, 'data_unit', 'kWh')}**")
-
-# --------------------------------------------------------------------------- data quality
-imp_tot, exp_tot = float(df.import_kWh.sum()), float(df.export_kWh.sum())
-
-# Objet conservé uniquement pour maintenir la compatibilité avec report.py.
-# Le contrôle Swissolar est désactivé puisque les données PV ne sont plus demandées.
-swissolar = {
-    "available": False,
-    "pv_power_kwp": 0.0,
-    "pv_production_kwh": 0.0,
-    "total_consumption_kwh": 0.0,
-    "production_ref_kwh": None,
-    "consumption_ref_kwh": None,
-    "overall_ref_kwh": None,
-}
-with st.expander(T("dq_expander"), expanded=len(loaded) > 1 or bool(skipped)):
-    st.markdown(T("files_loaded_header"))
-    for name, (d, m) in loaded.items():
-        st.caption(T("file_ok", name=name, vendor=m.vendor, days=f"{m.coverage_days:.0f}",
-                     imp=float(d.import_kWh.sum()), exp=float(d.export_kWh.sum()))
-                   + f" | unité appliquée : {getattr(m, 'data_unit', 'kWh')}")
-    for name, reason in skipped:
-        st.caption(T("file_skipped", name=name, reason=reason))
-    st.divider()
-    q1, q2, q3, q4 = st.columns(4)
-    q1.metric(T("dq_source"), meta.vendor)
-    q2.metric(T("dq_dt"), T("unit_min", n=f"{meta.dt_hours*60:.0f}"))
-    q3.metric(T("dq_coverage"), T("unit_days", n=f"{meta.coverage_days:.0f}"))
-    q4.metric(T("dq_points"), f"{meta.n_rows:,}")
-    st.write(T("dq_totals", imp=imp_tot, exp=exp_tot))
-    if meta.coverage_days < 360:
-        st.warning(T("dq_partial"))
-if exp_tot <= 0:
-    st.error(T("dq_no_surplus"))
-    st.stop()
-
-# --------------------------------------------------------------------------- simulate + recommend
-def _best_per_capacity_local(results: pd.DataFrame) -> pd.DataFrame:
-    idx = results.groupby("Cap_kWh")["Gain_CHF"].idxmax()
-    return results.loc[idx].sort_values("Cap_kWh").reset_index(drop=True)
-
-
-def _auto_capacity_max_from_curve(
-    results: pd.DataFrame,
-    cap_limit: int,
-    cap_step: int,
-    min_gain_share: float = 0.98,
-    marginal_floor_chf_per_kwh: float = 2.0,
-    window_kwh: float = 10.0,
-) -> int:
-    """Choose an automatic upper bound once the gain curve has flattened.
-
-    The returned value is a search limit, not necessarily the recommended capacity.
-    A small margin is kept after the plateau so the charts still show why adding more
-    capacity is not useful.
     """
-    if results.empty:
-        return int(cap_limit)
 
-    f = _best_per_capacity_local(results).copy()
-    f["Gain_mono"] = f["Gain_CHF"].cummax()
-    gain_max = float(f["Gain_mono"].max())
-    if gain_max <= 0:
-        return int(max(f["Cap_kWh"].min(), 1))
-
-    for i, row in f.iterrows():
-        cap_i = float(row["Cap_kWh"])
-        gain_i = float(row["Gain_mono"])
-        if gain_i < gain_max * min_gain_share:
-            continue
-
-        future = f[f["Cap_kWh"] >= cap_i + window_kwh]
-        if future.empty:
-            continue
-        j = int(future.index[0])
-        cap_j = float(f.loc[j, "Cap_kWh"])
-        gain_j = float(f.loc[j, "Gain_mono"])
-        marginal = max(0.0, gain_j - gain_i) / max(cap_j - cap_i, 1e-9)
-
-        if marginal <= marginal_floor_chf_per_kwh:
-            margin = max(5, int(2 * cap_step))
-            return int(min(cap_limit, round(cap_i + margin)))
-
-    return int(cap_limit)
+@st.cache_data(show_spinner=False, max_entries=8)
+def _load_cached(files, data_unit, position, ambiguous, minutes, same_meter, aggregate_devices=False, blank_policy="auto"):
+    if sum(len(data) for _, data in files) > 100 * 1024**2:
+        raise UnsupportedFormatError("Lot trop volumineux : maximum 100 Mo.")
+    with tempfile.TemporaryDirectory() as directory:
+        paths = []
+        for index, (name, data) in enumerate(files):
+            if len(data) > 30 * 1024**2:
+                raise UnsupportedFormatError("Un fichier dépasse la limite de 30 Mo.")
+            # User names never become filesystem paths.
+            suffix = Path(name).suffix.lower()
+            path = Path(directory) / f"mesures_{index:03d}{suffix}"
+            path.write_bytes(data)
+            if suffix == ".xlsx":
+                with ZipFile(path) as archive:
+                    if sum(z.file_size for z in archive.infolist()) > 250 * 1024**2:
+                        raise UnsupportedFormatError("Classeur trop volumineux après décompression (250 Mo maximum).")
+            paths.append(path)
+        frame, meta = load_meter_files(paths, data_unit, timestamp_position=position,
+            ambiguous_policy=ambiguous, interval_minutes=minutes, same_meter=same_meter,
+            aggregate_devices=aggregate_devices, blank_policy=blank_policy)
+    return frame, replace(meta, source="; ".join(name for name, _ in files))
 
 
-powers = list(range(int(p_min), int(p_max) + 1, int(p_step)))
-cap_max_effective = int(cap_max)
+@st.cache_data(show_spinner=False, max_entries=10)
+def _grid_cached(imp, exp, caps, powers, options, max_c_rate):
+    return grid_search(imp, exp, caps, powers, max_c_rate=max_c_rate, **options)
 
 
-# Important : la recommandation est calculée sur la plage complète du mode,
-# pas sur Cap.min. Ainsi, déplacer Cap.min ne déplace plus artificiellement le knee point.
-calc_cap_min = int(mode_cap_min)
+@st.cache_data(show_spinner=False, max_entries=16)
+def _simulate_cached(imp, exp, capacity, power, options):
+    return simulate(imp, exp, capacity, power, **options)
 
-if auto_cap_max:
-    auto_limit = int(cap_max)
-    auto_caps = list(range(calc_cap_min, auto_limit + 1, int(cap_step)))
-    if auto_caps and powers:
-        with st.spinner("Recherche automatique de la capacité max..."):
-            auto_results = grid_search(
-                df.import_kWh.values,
-                df.export_kWh.values,
-                auto_caps,
-                powers,
-                meta.dt_hours,
-                roundtrip_eff,
-                tariff_import,
-                tariff_export,
-                meta.coverage_days,
-                soc_min_pct=soc_min_pct,
-                timestamps=df.timestamp.values,
-                tariff_import_ht=tariff_import_ht,
-                tariff_import_bt=tariff_import_bt,
-                high_tariff_periods=high_tariff_periods,
-                weekend_low_tariff=weekend_low_tariff,
-                max_c_rate=max_c_rate,
-                peak_shaving_enabled=False,
-                peak_target_kW=None,
-                peak_power_tariff_chf_per_kw_month=0.0,
-        peak_billing_mode="annual_band",
-                peak_reserve_pct=0.0,
-                peak_grid_recharge=False,
-            )
-        cap_max_effective = _auto_capacity_max_from_curve(
-            auto_results,
-            cap_limit=auto_limit,
-            cap_step=int(cap_step),
-        )
-        st.sidebar.caption(f"Cap. max auto utilisée : {cap_max_effective} kWh")
 
-calc_caps = list(range(calc_cap_min, int(cap_max_effective) + 1, int(cap_step)))
-display_min = max(int(cap_min), calc_cap_min)
-display_caps = list(range(display_min, int(cap_max_effective) + 1, int(cap_step)))
+def _fmt(value, digits=0):
+    return f"{float(value):,.{digits}f}".replace(",", " ")
 
-if not calc_caps or not powers:
-    st.error(T("empty_range"))
-    st.stop()
 
-with st.spinner(T("spinner_sim", n=len(calc_caps) * len(powers))):
-    results = grid_search(
-        df.import_kWh.values,
-        df.export_kWh.values,
-        display_caps or calc_caps,
-        powers,
-        meta.dt_hours,
-        roundtrip_eff,
-        tariff_import,
-        tariff_export,
-        meta.coverage_days,
-        soc_min_pct=soc_min_pct,
-        timestamps=df.timestamp.values,
-        tariff_import_ht=tariff_import_ht,
-        tariff_import_bt=tariff_import_bt,
-        high_tariff_periods=high_tariff_periods,
-        weekend_low_tariff=weekend_low_tariff,
-        max_c_rate=max_c_rate,
-        peak_shaving_enabled=False,
-        peak_target_kW=None,
-        peak_power_tariff_chf_per_kw_month=0.0,
-        peak_billing_mode="annual_band",
-        peak_reserve_pct=0.0,
-        peak_grid_recharge=False,
-    )
-    rec_results = grid_search(
-        df.import_kWh.values,
-        df.export_kWh.values,
-        calc_caps,
-        powers,
-        meta.dt_hours,
-        roundtrip_eff,
-        tariff_import,
-        tariff_export,
-        meta.coverage_days,
-        soc_min_pct=soc_min_pct,
-        timestamps=df.timestamp.values,
-        tariff_import_ht=tariff_import_ht,
-        tariff_import_bt=tariff_import_bt,
-        high_tariff_periods=high_tariff_periods,
-        weekend_low_tariff=weekend_low_tariff,
-        max_c_rate=max_c_rate,
-        peak_shaving_enabled=False,
-        peak_target_kW=None,
-        peak_power_tariff_chf_per_kw_month=0.0,
-        peak_billing_mode="annual_band",
-        peak_reserve_pct=0.0,
-        peak_grid_recharge=False,
-    )
-    rec = recommend(
-        rec_results,
-        cycles_low=cycles_low,
-        coverage_days=meta.coverage_days,
-        brand=brand,
-        study_mode=study_mode,
-        ci_gain_share=0.95,
-        min_cycles_per_year=min_cycles_per_year,
-    )
+def _tariff_settings():
+    st.sidebar.markdown("**Tarifs énergie**")
+    name = st.sidebar.selectbox("Profil tarifaire GRD", list(GRD_PROFILES),
+        index=list(GRD_PROFILES).index("Groupe E"), key="tariff_profile")
+    year = int(st.sidebar.number_input("Année du scénario tarifaire", min_value=2000, max_value=2100,
+                                       value=2026, step=1, key="tariff_year"))
+    profile = get_profile(name, year)
+    token = f"{name}_{year}"
+    st.sidebar.caption(profile["price_note"])
+    unique = st.sidebar.checkbox("Tarif achat unique 24h/24", value=bool(profile.get("single_tariff", False)),
+                                  key=f"unique_{token}")
+    ht = st.sidebar.number_input("Tarif achat " + ("unique" if unique else "HT") + " (CHF/kWh)",
+        value=float(profile["ht"]), step=.001, format="%.4f", key=f"ht_{token}")
+    bt = ht if unique else st.sidebar.number_input("Tarif achat BT (CHF/kWh)",
+        value=float(profile["bt"]), step=.001, format="%.4f", key=f"bt_{token}")
+    export = st.sidebar.number_input("Tarif reprise (CHF/kWh)", value=float(profile["export"]),
+                                     step=.001, format="%.4f", key=f"export_{token}")
+    with st.sidebar.expander("Horaires et référence tarifaire"):
+        period_text = st.text_input("Plages HT (ex. 7-12;17-23)",
+            value=";".join(f"{a:g}-{b:g}" for a, b in profile["periods"]),
+            key=f"periods_{token}", disabled=unique)
+        weekend = st.checkbox("Week-end entièrement BT", value=bool(profile["weekend_low"]),
+                              key=f"weekend_{token}", disabled=unique)
+        st.caption(profile.get("source", "Contrat à vérifier"))
+        note = st.text_input("Référence du contrat / produit", value="", key=f"contract_{token}")
+    periods = () if unique else parse_periods(period_text)
+    return dict(name=name, year=year, ht=float(ht), bt=float(bt), export=float(export),
+                periods=periods, weekend=False if unique else weekend, note=note)
 
-best = rec.best
-sim = simulate(
-    df.import_kWh.values,
-    df.export_kWh.values,
-    best.Cap_kWh,
-    best.Power_kW,
-    meta.dt_hours,
-    roundtrip_eff,
-    tariff_import,
-    tariff_export,
-    meta.coverage_days,
-    soc_min_pct=soc_min_pct,
-    timestamps=df.timestamp.values,
-    tariff_import_ht=tariff_import_ht,
-    tariff_import_bt=tariff_import_bt,
-    high_tariff_periods=high_tariff_periods,
-    weekend_low_tariff=weekend_low_tariff,
-    peak_shaving_enabled=False,
-    peak_target_kW=None,
-    peak_power_tariff_chf_per_kw_month=0.0,
-                peak_billing_mode="annual_band",
-    peak_reserve_pct=0.0,
-    peak_grid_recharge=False,
-)
 
-# --------------------------------------------------------------------------- KPI cards
-def _fmt_kwh(v: float) -> str:
-    return f"{float(v):,.0f}".replace(",", " ")
+def _calendar(meta, tariffs):
+    mode = st.selectbox("Application des tarifs", ["Scénario tarifaire unique", "Calendrier par période"], key="tariff_application")
+    if mode == "Scénario tarifaire unique":
+        note = (f"Tarifs du scénario {tariffs['year']} appliqués à tous les intervalles mesurés, "
+                "aux jours et heures de la courbe source. Ce n'est pas une reconstitution des factures historiques.")
+        st.caption(note)
+        return None, note
+    st.caption("Chaque période est définie par un début inclus et une fin exclue. Renseigner les prix et horaires du contrat ; aucun trou ni chevauchement n'est accepté.")
+    first = pd.Timestamp(meta.start).year
+    last = (pd.Timestamp(meta.end) - pd.Timedelta(seconds=1)).year
+    defaults = []
+    for year in range(first, last + 1):
+        profile = get_profile(tariffs["name"], year)
+        defaults.append({"Début": f"{year}-01-01", "Fin exclue": f"{year+1}-01-01",
+                         "HT": tariffs["ht"], "BT": tariffs["bt"], "Reprise": tariffs["export"],
+                         "Plages HT": ";".join(f"{a:g}-{b:g}" for a, b in profile["periods"]),
+                         "Week-end BT": profile["weekend_low"]})
+    table = st.data_editor(pd.DataFrame(defaults), num_rows="dynamic", hide_index=True,
+        key=f"calendar_{meta.fingerprint}_{tariffs['name']}", width="stretch")
+    table["Plages HT"] = table["Plages HT"].fillna("")
+    if table.empty or table.isna().any().any():
+        raise ValueError("Renseigner toutes les cellules du calendrier tarifaire.")
+    schedule = []
+    for _, row in table.iterrows():
+        schedule.append(dict(start=str(row["Début"]), end=str(row["Fin exclue"]), ht=float(row.HT),
+            bt=float(row.BT), export=float(row.Reprise), periods=parse_periods(row["Plages HT"]),
+            weekend_low=bool(row["Week-end BT"])))
+    return schedule, "Calendrier explicite de prix et horaires, appliqué aux dates réelles des mesures."
 
-def _fmt_chf(v: float) -> str:
-    return f"{float(v):,.0f}".replace(",", " ")
 
-import_before_total = float(sim.import_before)
-import_after_total = float(sim.import_after_total)
-import_avoided_total = float(sim.import_avoided)
 
-export_before_total = float(sim.export_before)
-export_after_total = float(sim.export_after_total)
-export_avoided_total = float(sim.export_stored)
 
-# Surplus moyen journalier sur la période analysée.
-# Les données internes sont déjà normalisées en kWh par intervalle.
-coverage_days_for_average = float(getattr(meta, "coverage_days", 0.0) or 0.0)
-surplus_average_kwh_per_day = (
-    export_before_total / coverage_days_for_average
-    if coverage_days_for_average > 0
-    else 0.0
-)
 
-import_reduction_pct = (import_avoided_total / import_before_total * 100) if import_before_total > 0 else 0.0
-export_reduction_pct = (export_avoided_total / export_before_total * 100) if export_before_total > 0 else 0.0
+def _render_original_summary(sim, rec, meta, mode):
+    best = rec.best
+    study_mode = mode
+    soc_min_pct = sim.soc_min_pct
+    TECHNICAL_SOC_MIN_PCT = reserve_boundary_pct = soc_min_pct
+    technical_reserve_best_kwh = sim.capacity_kWh - sim.usable_capacity_kWh
+    usable_capacity_best_kwh = sim.usable_capacity_kWh
+    rec_range_label = f"{sim.capacity_kWh:g} kWh"
+    import_before_total, import_after_total, import_avoided_total = sim.import_before, sim.import_after_total, sim.import_avoided
+    export_before_total, export_after_total, export_avoided_total = sim.export_before, sim.export_after_total, sim.export_stored
+    import_reduction_pct, export_reduction_pct = 100 * sim.import_reduction, 100 * sim.surplus_captured
+    autoconso_gain_pct = sim.import_avoided / sim.export_before * 100 if sim.export_before > 0 else 0.
+    days = sim.valid.sum() * sim.dt_hours / 24
+    surplus_average_kwh_per_day = sim.export_before / days if days > 0 else 0.
+    gain_label = "Économies annuelles" if sim.annual_factor is not None else "Économies sur la période"
+    gain_value = sim.gain_annual_chf if sim.annual_factor is not None else sim.gain_chf
+    gain_unit = "CHF/an" if sim.annual_factor is not None else "CHF"
+    cycles_value = sim.cycles_per_year if sim.annual_factor is not None else sim.cycles_period
+    cycles_unit = "/an" if sim.annual_factor is not None else ""
+    cycle_verdict = "Utilisation correcte" if rec.recommended and sim.annual_factor is not None else "À confirmer"
+    _fmt_kwh = _fmt_chf = _fmt
+    st.markdown('<div class="mar-summary-title">Résumé de la simulation</div>', unsafe_allow_html=True)
 
-# Avec seulement import/export, on ne connaît pas toujours la production totale.
-# On affiche donc l'augmentation d'autoconsommation comme surplus PV récupéré sur place.
-autoconso_gain_pct = export_reduction_pct
-
-big = rec.max_gain_pick
-gain_share = (float(best.Gain_CHF) / float(rec.gain_max) * 100) if rec.gain_max > 0 else 0.0
-gain_max_extra = float(rec.gain_max - best.Gain_CHF)
-knee_cap = getattr(rec, "knee_capacity_kWh", None)
-knee_gain = getattr(rec, "knee_gain_chf", None)
-rec_min_cap = float(getattr(rec, "recommended_min_kWh", best.Cap_kWh) or best.Cap_kWh)
-rec_max_cap = float(getattr(rec, "recommended_max_kWh", best.Cap_kWh) or best.Cap_kWh)
-rec_range_label = (
-    f"{rec_min_cap:.0f}-{rec_max_cap:.0f} kWh"
-    if abs(rec_max_cap - rec_min_cap) >= 0.5
-    else f"{best.Cap_kWh:.0f} kWh"
-)
-
-usable_capacity_best_kwh = float(best.Cap_kWh) * (1.0 - float(soc_min_pct) / 100.0)
-technical_reserve_best_kwh = float(best.Cap_kWh) * TECHNICAL_SOC_MIN_PCT / 100.0
-peak_reserve_best_kwh = (
-    float(best.Cap_kWh) * max(float(reserve_boundary_pct) - TECHNICAL_SOC_MIN_PCT, 0.0) / 100.0
-)
-st.markdown('<div class="mar-summary-title">Résumé de la simulation</div>', unsafe_allow_html=True)
-
-st.markdown(
-    f"""
-    <div class="mar-card-grid-5">
-        <div class="mar-card">
-            <div class="mar-label"><span class="mar-icon">🔋</span>Capacité batterie</div>
-            <div class="mar-value mar-blue">{rec_range_label}</div>
-            <div class="mar-sub">Valeur centrale simulée : {best.Cap_kWh:.0f} kWh</div>
-        </div>
-        <div class="mar-card">
-            <div class="mar-label"><span class="mar-icon">⚡</span>Puissance batterie</div>
-            <div class="mar-value mar-blue">{best.Power_kW:.0f} kW</div>
-            <div class="mar-sub">Puissance de charge/décharge</div>
-        </div>
-        <div class="mar-card">
-            <div class="mar-label"><span class="mar-icon">💰</span>Économies annuelles</div>
-            <div class="mar-value mar-green">{_fmt_chf(best.Gain_CHF)} CHF/an</div>
-            <div class="mar-sub">Gain net HT/BT/revente</div>
-        </div>
-        <div class="mar-card">
-            <div class="mar-label"><span class="mar-icon">♻️</span>Cycles équivalents</div>
-            <div class="mar-value mar-purple">{best.Cycles_per_year:.0f}/an</div>
-            <div class="mar-pill">Utilisation correcte</div>
-        </div>
-        <div class="mar-card">
-            <div class="mar-label"><span class="mar-icon">🟠</span>Surplus capté</div>
-            <div class="mar-value mar-orange">{sim.surplus_captured:.0%}</div>
-            <div class="mar-sub">du surplus solaire</div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-if study_mode == "ci":
     st.markdown(
         f"""
-        <div class="mar-card-grid-3">
+        <div class="mar-card-grid-5">
             <div class="mar-card">
-                <div class="mar-label"><span class="mar-icon">🔒</span>Réserve technique</div>
-                <div class="mar-value mar-blue">{technical_reserve_best_kwh:,.0f} kWh</div>
-                <div class="mar-sub">Zone 0-{TECHNICAL_SOC_MIN_PCT:.0f} % · non utilisée</div>
+                <div class="mar-label"><span class="mar-icon">🔋</span>Capacité batterie</div>
+                <div class="mar-value mar-blue">{rec_range_label}</div>
+                <div class="mar-sub">Valeur centrale simulée : {best.Cap_kWh:g} kWh</div>
             </div>
             <div class="mar-card">
-                <div class="mar-label"><span class="mar-icon">🛡️</span>Réserve Peak Shaving</div>
-                <div class="mar-value mar-blue">{peak_reserve_best_kwh:,.0f} kWh</div>
-                <div class="mar-sub">Zone {TECHNICAL_SOC_MIN_PCT:.0f}-{reserve_boundary_pct:.0f} % dédiée aux pointes</div>
+                <div class="mar-label"><span class="mar-icon">⚡</span>Puissance batterie</div>
+                <div class="mar-value mar-blue">{best.Power_kW:g} kW</div>
+                <div class="mar-sub">Puissance de charge/décharge</div>
             </div>
             <div class="mar-card">
-                <div class="mar-label"><span class="mar-icon">🔋</span>Capacité autoconsommation</div>
-                <div class="mar-value mar-blue">{usable_capacity_best_kwh:,.0f} kWh</div>
-                <div class="mar-sub">Zone {reserve_boundary_pct:.0f}-100 %</div>
+                <div class="mar-label"><span class="mar-icon">💰</span>{gain_label}</div>
+                <div class="mar-value mar-green">{_fmt_chf(gain_value)} {gain_unit}</div>
+                <div class="mar-sub">Gain net HT/BT/revente</div>
+            </div>
+            <div class="mar-card">
+                <div class="mar-label"><span class="mar-icon">♻️</span>Cycles équivalents</div>
+                <div class="mar-value mar-purple">{cycles_value:.0f}{cycles_unit}</div>
+                <div class="mar-pill">{cycle_verdict}</div>
+            </div>
+            <div class="mar-card">
+                <div class="mar-label"><span class="mar-icon">🟠</span>Surplus capté</div>
+                <div class="mar-value mar-orange">{sim.surplus_captured:.0%}</div>
+                <div class="mar-sub">du surplus solaire</div>
             </div>
         </div>
-        """.replace(",", " "),
+        """,
         unsafe_allow_html=True,
     )
 
-st.markdown(
-    f"""
-    <div class="mar-card-grid-3">
-        <div class="mar-card small">
-            <div class="mar-label"><span class="mar-icon">🔌</span>Import avant</div>
-            <div class="mar-value small mar-blue">{_fmt_kwh(import_before_total)} kWh</div>
-            <div class="mar-sub">Depuis le réseau</div>
-        </div>
-        <div class="mar-card small">
-            <div class="mar-label"><span class="mar-icon">🏠</span>Import après</div>
-            <div class="mar-value small mar-blue">{_fmt_kwh(import_after_total)} kWh</div>
-            <div class="mar-sub">Depuis le réseau</div>
-        </div>
-        <div class="mar-card small">
-            <div class="mar-label"><span class="mar-icon">⬇️</span>Import évité</div>
-            <div class="mar-value small mar-green">{_fmt_kwh(import_avoided_total)} kWh</div>
-            <div class="mar-sub">-{import_reduction_pct:.0f} %</div>
-        </div>
-    </div>
+    if study_mode == "ci":
+        st.markdown(
+            f"""
+            <div class="mar-card-grid-3">
+                <div class="mar-card">
+                    <div class="mar-label"><span class="mar-icon">🔒</span>Capacité non utilisée</div>
+                    <div class="mar-value mar-blue">{technical_reserve_best_kwh:,.0f} kWh</div>
+                    <div class="mar-sub">Zone 0-{TECHNICAL_SOC_MIN_PCT:.0f} % · non utilisée</div>
+                </div>
+                <div class="mar-card">
+                    <div class="mar-label"><span class="mar-icon">🛡️</span>SOC minimum</div>
+                    <div class="mar-value mar-blue">{soc_min_pct:.0f} %</div>
+                    <div class="mar-sub">Limite basse choisie</div>
+                </div>
+                <div class="mar-card">
+                    <div class="mar-label"><span class="mar-icon">🔋</span>Capacité autoconsommation</div>
+                    <div class="mar-value mar-blue">{usable_capacity_best_kwh:,.0f} kWh</div>
+                    <div class="mar-sub">Zone {reserve_boundary_pct:.0f}-100 %</div>
+                </div>
+            </div>
+            """.replace(",", " "),
+            unsafe_allow_html=True,
+        )
 
-    <div class="mar-card-grid-3">
-        <div class="mar-card small">
-            <div class="mar-label"><span class="mar-icon">🔆</span>Export avant</div>
-            <div class="mar-value small mar-orange">{_fmt_kwh(export_before_total)} kWh</div>
-            <div class="mar-sub">Vers le réseau</div>
+    st.markdown(
+        f"""
+        <div class="mar-card-grid-3">
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">🔌</span>Import avant</div>
+                <div class="mar-value small mar-blue">{_fmt_kwh(import_before_total)} kWh</div>
+                <div class="mar-sub">Depuis le réseau</div>
+            </div>
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">🏠</span>Import après</div>
+                <div class="mar-value small mar-blue">{_fmt_kwh(import_after_total)} kWh</div>
+                <div class="mar-sub">Depuis le réseau</div>
+            </div>
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">⬇️</span>Import évité</div>
+                <div class="mar-value small mar-green">{_fmt_kwh(import_avoided_total)} kWh</div>
+                <div class="mar-sub">-{import_reduction_pct:.0f} %</div>
+            </div>
         </div>
-        <div class="mar-card small">
-            <div class="mar-label"><span class="mar-icon">🏡</span>Export après</div>
-            <div class="mar-value small mar-orange">{_fmt_kwh(export_after_total)} kWh</div>
-            <div class="mar-sub">Vers le réseau</div>
-        </div>
-        <div class="mar-card small">
-            <div class="mar-label"><span class="mar-icon">⬇️</span>Export évité</div>
-            <div class="mar-value small mar-green">{_fmt_kwh(export_avoided_total)} kWh</div>
-            <div class="mar-sub">-{export_reduction_pct:.0f} %</div>
-        </div>
-    </div>
 
-    <div class="mar-card-grid-1of3">
-        <div class="mar-card small">
-            <div class="mar-label"><span class="mar-icon">📊</span>Surplus moyen</div>
-            <div class="mar-value small mar-purple">{_fmt_kwh(surplus_average_kwh_per_day)} kWh/jour</div>
-            <div class="mar-sub">Moyenne réinjectée sur la période analysée</div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    f"""
-    <div class="mar-autoconso">
-        <div class="mar-label"><span class="mar-icon">☀️</span>Autoconsommation / valorisation du surplus solaire</div>
-        <div class="mar-autoconso-grid">
-            <div>
-                <div class="mar-sub">Surplus initial</div>
+        <div class="mar-card-grid-3">
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">🔆</span>Export avant</div>
                 <div class="mar-value small mar-orange">{_fmt_kwh(export_before_total)} kWh</div>
+                <div class="mar-sub">Vers le réseau</div>
             </div>
-            <div class="mar-autoconso-cell">
-                <div class="mar-sub">Surplus stocké par la batterie</div>
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">🏡</span>Export après</div>
+                <div class="mar-value small mar-orange">{_fmt_kwh(export_after_total)} kWh</div>
+                <div class="mar-sub">Vers le réseau</div>
+            </div>
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">⬇️</span>Export évité</div>
                 <div class="mar-value small mar-green">{_fmt_kwh(export_avoided_total)} kWh</div>
-            </div>
-            <div class="mar-autoconso-cell">
-                <div class="mar-sub">Augmentation d'autoconsommation</div>
-                <div class="mar-value small mar-green">+{autoconso_gain_pct:.0f} %</div>
+                <div class="mar-sub">-{export_reduction_pct:.0f} %</div>
             </div>
         </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
-if study_mode in {"residential", "pme"}:
-    st.info(
-        f"Plage recommandée : {rec_range_label}. "
-        f"La valeur centrale retenue pour la simulation est {best.Cap_kWh:.0f} kWh, "
-        f"avec environ {_fmt_chf(float(best.Gain_CHF))} CHF/an et "
-        f"{best.Cycles_per_year:.0f} cycles/an. Le choix est arrêté avant la zone où "
-        "les kWh supplémentaires n'apportent plus assez d'économies annuelles."
-    )
-elif knee_cap is not None and knee_gain is not None:
-    st.info(
-        f"{mode_rec_label} : {float(knee_cap):.0f} kWh "
-        f"pour environ {_fmt_chf(float(knee_gain))} CHF/an."
+        <div class="mar-card-grid-1of3">
+            <div class="mar-card small">
+                <div class="mar-label"><span class="mar-icon">📊</span>Surplus moyen</div>
+                <div class="mar-value small mar-purple">{_fmt_kwh(surplus_average_kwh_per_day)} kWh/jour</div>
+                <div class="mar-sub">Moyenne réinjectée sur la période analysée</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-for code, params in rec.warnings:
-    if code == "no_configuration_meets_min_cycles":
-        st.warning(
-            f"Aucune configuration ne respecte le minimum de "
-            f"{float(params['min_cycles']):.0f} cycles/an. "
-            "La recommandation est donc calculée sans ce filtre. Réduisez le seuil "
-            "ou vérifiez la plage de capacités."
-        )
-    else:
-        (st.error if code in ERROR_CODES else st.warning)(msg(L, code, params))
-for code, params in rec.notes:
-    if code == "min_cycles_filter_applied":
-        st.caption(
-            f"• Contrôle technique appliqué : minimum "
-            f"{float(params['min_cycles']):.0f} cycles/an."
-        )
-    elif code == "marginal_stop":
-        st.caption(
-            f"• Arrêt sur rendement marginal relatif : les prochains paliers représentent "
-            f"{float(params['next_ratio']) * 100:.0f}% du meilleur gain marginal observé "
-            f"(seuil : {float(params['relative_floor']) * 100:.0f}%)."
-        )
-    elif code == "smaller_than_max":
-        pass
-    else:
-        st.caption("• " + msg(L, code, params))
-
-with st.expander("Détail du gain tarifaire", expanded=False):
-    tariff_detail = pd.DataFrame(
-        {
-            "Poste": [
-                "Import évité haut tarif",
-                "Import évité bas tarif",
-                "Valeur de revente perdue",
-                "Gain net batterie",
-            ],
-            "kWh/an": [
-                getattr(sim, "import_avoided_ht", 0.0),
-                getattr(sim, "import_avoided_bt", 0.0),
-                getattr(sim, "export_stored", 0.0),
-                "",
-            ],
-            "Tarif CHF/kWh": [
-                tariff_import_ht,
-                tariff_import_bt,
-                tariff_export,
-                "",
-            ],
-            "CHF/an": [
-                getattr(sim, "gain_ht_chf", 0.0),
-                getattr(sim, "gain_bt_chf", 0.0),
-                -getattr(sim, "export_value_lost_chf", 0.0),
-                getattr(sim, "gain_chf", 0.0),
-            ],
-        }
-    )
-    st.dataframe(tariff_detail, use_container_width=True, hide_index=True)
-    st.caption(
-        f"Formule : gain = import évité HT × {tariff_import_ht:.4f} "
-        f"+ import évité BT × {tariff_import_bt:.4f} "
-        f"- surplus stocké × {tariff_export:.4f}. "
-        f"Profil utilisé : {tariff_profile}."
+    st.markdown(
+        f"""
+        <div class="mar-autoconso">
+            <div class="mar-label"><span class="mar-icon">☀️</span>Autoconsommation / valorisation du surplus solaire</div>
+            <div class="mar-autoconso-grid">
+                <div>
+                    <div class="mar-sub">Surplus initial</div>
+                    <div class="mar-value small mar-orange">{_fmt_kwh(export_before_total)} kWh</div>
+                </div>
+                <div class="mar-autoconso-cell">
+                    <div class="mar-sub">Surplus stocké par la batterie</div>
+                    <div class="mar-value small mar-green">{_fmt_kwh(export_avoided_total)} kWh</div>
+                </div>
+                <div class="mar-autoconso-cell">
+                    <div class="mar-sub">Surplus restitué au site</div>
+                    <div class="mar-value small mar-green">{autoconso_gain_pct:.0f} %</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-# --------------------------------------------------------------------------- energy dashboard
-st.divider()
-render_energy_dashboard(df, sim, best)
 
-# --------------------------------------------------------------------------- payback charts
-# Two lenses on "how big", ported from battery_sizing_explained.ipynb. The recommendation is
-# where the independent money + cycles views agree; each chart corrects a different
-# misreading. Kept: whole-system payback U (money optimum) + cycles/yr (price-free use proxy).
+
+
+
+ORIGINAL_LABELS = {'uploader': 'Fichiers compteur (Huawei / Groupe E / SolarEdge, Excel ou CSV ; vous pouvez déposer les '
+             "12 fichiers mensuels Huawei d'un coup)",
+ 'drop_prompt': "⬆️ Déposez un ou plusieurs fichiers pour lancer l'analyse.",
+ 'legend_gain': 'Gain sur la période (CHF)',
+ 'legend_cycles': 'Cycles/an',
+ 'legend_recommended': 'Recommandé',
+ 'legend_maxgain': 'Gain max',
+ 'axis_capacity': 'Capacité (kWh)',
+ 'axis_gain': 'Gain (CHF/an)',
+ 'axis_cycles': 'Cycles DC/an (capacité utile)',
+ 'col_pct_max': '% du gain max',
+ 'axis_soc': 'SOC (%)',
+ 'axis_date': 'Date',
+ 'soc_title': 'État de charge, {cap} kWh / {power} kW',
+ 'cyc_legend_cum': 'Cycles cumulés',
+ 'cyc_legend_steady': 'rythme constant (idéal)',
+ 'cyc_axis': 'Cycles équivalents cumulés',
+ 'cyc_title': 'Cycles cumulés sur la période simulée',
+ 'ba_axis': 'kWh / mois',
+ 'pay_earns_title': "Ce que chaque kWh ajouté RAPPORTE vs ce qu'il COÛTE à posséder",
+ 'pay_earns_axis': 'CHF/an gagnés par ce kWh',
+ 'pay_nth_axis': 'le N-ième kWh de capacité',
+ 'pay_own_band': 'coûte à posséder 1 kWh/an ({lo:.0f}-{hi:.0f} CHF)',
+ 'pay_kpi_rec': 'Taille recommandée',
+ 'pay_kpi_payback': 'Rentabilité à cette taille',
+ 'pay_kpi_best': 'Taille la plus rentable',
+ 'pay_yr_val': '{v} ans',
+ 'pay_verdict': 'Configuration étudiée : {rec} kWh ({cyc} cycles DC/an).',
+ 'pay_health_title': 'Économies selon la taille, prendre la plus haute barre **VERTE** (la plus grande '
+                     'encore pleinement cyclée)',
+ 'pay_health_caption': 'Vert = cycle encore ≥ {low}/an (chaque kWh est utilisé). Gris = surdimensionné '
+                       '(sous {low}/an, capacité qui dort). Les économies montent toujours avec la '
+                       'taille, mais au-delà du vert vous payez de la capacité inutilisée : le meilleur '
+                       'achat est donc la plus haute barre verte.',
+ 'pay_rec_star': '★ {cap} kWh',
+ 'pay_oversized_note': 'surdimensionné : capacité inutilisée',
+ 'pay_legend_healthy': 'pleinement cyclée (saine)',
+ 'pay_legend_oversized': 'surdimensionnée (capacité qui dort)',
+ 'pay_earns_caption': 'Chaque barre = ce que rapporte le **kWh suivant** par an ; la bande grise = ce '
+                      "qu'un kWh **coûte à posséder** par an. Règle d'arrêt : ajouter des kWh tant que "
+                      "les barres atteignent la bande, s'arrêter quand elles passent nettement en "
+                      "dessous (vert = clairement rentable · orange = à l'équilibre · rouge = coûte "
+                      "plus qu'il ne rapporte). Le 1er kWh rapporte en général le plus, c'est la courbe "
+                      "qui s'aplatit, pas une raison de n'acheter qu'1 kWh.",
+ 'pay_status_green': "À vos prix, la taille recommandée **{rec} kWh** rapporte encore plus qu'elle ne "
+                     'coûte (vert) : la vue monétaire et le choix par cycles concordent.',
+ 'pay_status_amber': "À vos prix, la taille recommandée **{rec} kWh** est à l'équilibre (orange) : "
+                     'monétaire et choix par cycles concordent à peu près.',
+ 'pay_status_red': "À vos prix, la taille recommandée **{rec} kWh** coûte déjà plus par kWh qu'elle ne "
+                   'rapporte (rouge). Elle est dimensionnée pour un **cyclage sain, pas pour la '
+                   "rentabilité** : si l'argent prime, réduire vers **{pb} kWh** (le creux de "
+                   'rentabilité) ou la dernière barre verte.',
+ 'pay_rec_line': 'Recommandé : {cap} kWh',
+ 'pay_rec_caption': 'La barre verte la plus haute est le **1er kWh**, pas le meilleur achat. La ligne '
+                    'verticale marque la taille **recommandée ({cap} kWh)** : la plus grande qui reste '
+                    'dans la bande de cycles saine.',
+ 'pay_pb_title': 'Rentabilité système (coût fixe + modules), en U : 1 kWh et 20 kWh perdent',
+ 'pay_pb_axis': 'Retour sur investissement (ans)',
+ 'pay_life_line': 'Horizon de comparaison : {life} ans',
+ 'pay_best_label': 'moins mauvais',
+ 'pay_pb_caption': "Le coût fixe d'installation se répartit sur la capacité, d'où un U : trop petit "
+                   'gaspille les frais fixes, trop grand porte de la capacité inutilisée. Le creux '
+                   '**{pb} kWh** est la taille au meilleur retour. Le choix affiché **{rec} kWh** est '
+                   "décidé sur les cycles (sans prix) ; s'ils diffèrent, **{pb} kWh** est le choix "
+                   'monétaire et **{rec} kWh** le mieux cyclé : choisir selon ce que le client '
+                   'privilégie.',
+ 'pay_curve_marg': 'le N-ième kWh rapporte',
+ 'pay_curve_total': 'gain total (CHF/an)',
+ 'pay_curve_y_marg': 'CHF/an par kWh ajouté',
+ 'pay_curve_y_total': 'gain total (CHF/an)',
+ 'pay_curve_caption': 'Les économies totales montent toujours, mais chaque kWh ajouté rapporte moins '
+                      "que le précédent (barres qui rétrécissent). La courbe s'aplatit car une batterie "
+                      'se remplit de bas en haut, le 1er kWh capte le surplus de chaque jour, le '
+                      'dernier seulement les rares gros jours. **Gain max** surdimensionne car il '
+                      'chasse cette queue plate.',
+ 'pay_cycles_use': 'cycles/an (usage)',
+ 'pay_cycles_frac': 'capacité cyclée par jour',
+ 'pay_cycles_healthy': 'Seuil interne : {low}–{high} cycles DC/an',
+ 'pay_cycles_oversized': 'Repère de cycles : 150/an',
+ 'pay_cycles_y2': 'Cycles DC par jour',
+ 'pay_cycles_caption': "Les cycles/an mesurent l'intensité d'usage de chaque kWh. Au-dessus de {low} = "
+                       'chaque kWh utilisé quotidiennement (bande verte) ; sous 150 = capacité inactive '
+                       '(surdimensionné). La taille recommandée est la plus grande qui reste dans le '
+                       'vert , un indicateur sans prix de **bien utilisée**.',
+ 'pay_best_annot_undersized': 'moins mauvais (optimum monétaire)<br>{cap} kWh · {pb} an<br>mais ~{gap} '
+                              'CHF/an de moins<br>que {rec} kWh, encore bien cyclé →<br>pourquoi on '
+                              'agrandit',
+ 'pay_best_annot_oversized': 'moins mauvais (optimum monétaire)<br>{cap} kWh · {pb} an<br>mais {cyc} '
+                             'cycles/an &lt; {low} :<br>capacité sous-utilisée →<br>pourquoi on ne '
+                             'choisit pas ça',
+ 'pay_best_annot_agree': 'optimum monétaire = recommandé<br>{cap} kWh · {pb} an<br>retour et cycles '
+                         'concordent ici',
+ 'pay_rec_annot': 'recommandé : {cap} kWh (sain en cycles)',
+ 'pay_pb_hover': '{cap} kWh → retour {pb} an',
+ 'pay_cycles_hover': '{cap} kWh · {cyc} cycles/an',
+ 'pay_cycles_hover2': '{cap} kWh · {frac}× capacité/jour',
+ 'pdf_button': '⬇️ Télécharger le rapport PDF',
+ 'pdf_filename': 'bilan_batterie.pdf'}
+
+def _original_label(key, **fmt):
+    return ORIGINAL_LABELS[key].format(**fmt)
+
 def _payback_reason(F, T, rec_cap, cycles_low):
     """Why the recommendation differs from the payback low-point (money optimum).
 
@@ -1097,7 +547,6 @@ def _payback_reason(F, T, rec_cap, cycles_low):
         text = T("pay_best_annot_oversized", cyc=f"{best.Cycles_per_year:.0f}",
                  low=int(cycles_low), **common)
     return best, text
-
 
 def _fig_payback(F, T, life, rec_cap, cycles_low):
     """Lens 3 — whole-system payback (fixed install + modules). U-shaped: 1 kWh and 20 kWh
@@ -1130,7 +579,6 @@ def _fig_payback(F, T, life, rec_cap, cycles_low):
                                       bordercolor="#7c3aed"),
                       height=380, margin=dict(t=60, r=50, l=60, b=50))
     return fig
-
 
 def _fig_cycles(F, T, cycles_low, cycles_high, rec_cap):
     """Lens 4 — cycles/yr + capacity cycled per day, with the healthy band. The price-free
@@ -1167,249 +615,411 @@ def _fig_cycles(F, T, cycles_low, cycles_high, rec_cap):
                       margin=dict(t=60, r=70, l=60, b=50))
     return fig
 
+def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_max, cycles_low):
+    T = _original_label
+    annual = sim.annual_factor is not None
+    best, big = rec.best, rec.max_gain_pick
+    cycles_col = "Cycles_per_year" if annual else "Cycles_period"
+    cycles_axis = "Cycles DC/an" if annual else "Cycles DC sur la période"
+    min_cycles_per_year, cycles_high = cycles_low, max(350., cycles_low + 100.)
+    with st.sidebar.expander("Plage et pas d'affichage"):
+        bounds = (float(rec.frontier.Cap_kWh.min()), float(rec.frontier.Cap_kWh.max()))
+        if bounds[0] != bounds[1]:
+            bounds = st.slider("Capacités affichées (kWh)", bounds[0], bounds[1], bounds, key=f"display_bounds_{mode}_{cap_min}_{cap_max}")
+        stride = st.select_slider("Afficher un point sur", options=[1, 2, 5, 10], value=1, key="display_step")
+        st.caption("Affichage uniquement ; la configuration étudiée reste identique.")
+        st.download_button("Configurations simulées (CSV)", results.to_csv(index=False).encode("utf-8-sig"), "configurations_batterie.csv", "text/csv")
+    f = rec.frontier.copy()
+    f["Marginal_CHF_per_kWh"] = f.Gain_CHF.diff() / f.Cap_kWh.diff()
+    display_frontier = f[f.Cap_kWh.between(*bounds)].iloc[::stride]
+    tab_front, tab_pay, tab_soc, tab_cyc, tab_ba = st.tabs(
+        ["📈 Gain vs capacité", "Rentabilité", "🔋 État de charge", "♻️ Cycles cumulés", "📊 Avant / Après"])
+    with tab_front:
+        f = display_frontier.copy()
 
-# --------------------------------------------------------------------------- charts
-tab_front, tab_pay, tab_soc, tab_cyc, tab_ba = st.tabs(
-    [T("tab_front"), T("tab_pay"), T("tab_soc"), T("tab_cyc"), T("tab_ba")]
-)
-
-with tab_front:
-    f = rec.frontier.copy().sort_values("Cap_kWh").reset_index(drop=True)
-
-    fig = go.Figure()
-    fig.add_hrect(
-        y0=min_cycles_per_year,
-        y1=brand.cycles_high,
-        line_width=0,
-        fillcolor="green",
-        opacity=0.08,
-        yref="y2",
-        annotation_text="zone d'utilisation acceptable",
-        annotation_position="top left",
-    )
-    fig.add_trace(go.Scatter(
-        x=f.Cap_kWh,
-        y=f.Gain_CHF,
-        name=T("legend_gain"),
-        mode="lines+markers",
-        line=dict(color="#2563eb"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=f.Cap_kWh,
-        y=f.Cycles_per_year,
-        name=T("legend_cycles"),
-        mode="lines+markers",
-        line=dict(color="#16a34a", dash="dot"),
-        yaxis="y2",
-    ))
-    fig.add_trace(go.Scatter(
-        x=[best.Cap_kWh],
-        y=[best.Gain_CHF],
-        name=T("legend_recommended"),
-        mode="markers",
-        marker=dict(size=16, color="#2563eb", symbol="star"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=[big.Cap_kWh],
-        y=[big.Gain_CHF],
-        name=T("legend_maxgain"),
-        mode="markers",
-        marker=dict(size=12, color="#dc2626", symbol="x"),
-    ))
-    fig.update_layout(
-        xaxis_title=T("axis_capacity"),
-        yaxis_title=T("axis_gain"),
-        yaxis2=dict(title=T("axis_cycles"), overlaying="y", side="right"),
-        legend=dict(orientation="h", y=1.12),
-        height=450,
-        margin=dict(t=40),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    marginal_floor = float(getattr(rec, "marginal_floor_chf_per_kwh", 0.0) or 0.0)
-    fig_marg = go.Figure()
-    fig_marg.add_trace(go.Bar(
-        x=f.Cap_kWh,
-        y=f.Marginal_CHF_per_kWh.fillna(0.0),
-        name="Gain du kWh ajouté",
-        hovertemplate="Capacité %{x:.0f} kWh : +%{y:.1f} CHF/an par kWh ajouté<extra></extra>",
-    ))
-    fig_marg.add_hline(
-        y=marginal_floor,
-        line_dash="dash",
-        line_color="#dc2626",
-        annotation_text="Seuil relatif : 30% du meilleur gain marginal",
-        annotation_position="top right",
-    )
-    fig_marg.add_vline(
-        x=float(best.Cap_kWh),
-        line_color="#2563eb",
-        annotation_text=f"Recommandé : {best.Cap_kWh:.0f} kWh",
-        annotation_position="top left",
-    )
-    fig_marg.update_layout(
-        title="Gain marginal de chaque kWh de batterie ajouté",
-        xaxis_title="Capacité atteinte (kWh)",
-        yaxis_title="CHF/an par kWh ajouté",
-        height=330,
-        margin=dict(t=55),
-    )
-    st.plotly_chart(fig_marg, use_container_width=True)
-    st.caption(
-        "La recommandation s'arrête lorsque la moyenne des deux prochains paliers passe "
-        "sous 30% du meilleur gain marginal observé sur la courbe. Les cycles restent un contrôle "
-        "technique, mais ne poussent plus la capacité vers la partie plate de la courbe."
-    )
-
-    cols = [
-        "Cap_kWh", "Power_kW", "Gain_CHF", "Marginal_CHF_per_kWh",
-        "Forward_marginal_2step", "Cycles_per_year"
-    ]
-    st.dataframe(
-        f.assign(**{T("col_pct_max"): (f.Gain_CHF / rec.gain_max * 100).round(1)})[
-            ["Cap_kWh", "Power_kW", "Gain_CHF", T("col_pct_max"),
-             "Marginal_CHF_per_kWh", "Forward_marginal_2step", "Cycles_per_year"]
-        ].round(3),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-with tab_pay:
-    # Two size lenses (notebook §29): whole-system payback (money optimum) + cycles/yr
-    # (price-free use proxy). The recommendation is where they agree; each corrects a
-    # different misreading of a single money view.
-    pay_caps = list(range(int(mode_cap_min), int(cap_max_effective) + 1, int(cap_step)))
-    pay_gs = grid_search(
-        df.import_kWh.values,
-        df.export_kWh.values,
-        pay_caps,
-        powers,
-        meta.dt_hours,
-        roundtrip_eff,
-        tariff_import,
-        tariff_export,
-        meta.coverage_days,
-        soc_min_pct=soc_min_pct,
-        timestamps=df.timestamp.values,
-        tariff_import_ht=tariff_import_ht,
-        tariff_import_bt=tariff_import_bt,
-        high_tariff_periods=high_tariff_periods,
-        weekend_low_tariff=weekend_low_tariff,
-        max_c_rate=max_c_rate,
-        peak_shaving_enabled=False,
-        peak_target_kW=None,
-        peak_power_tariff_chf_per_kw_month=0.0,
-        peak_billing_mode="annual_band",
-        peak_reserve_pct=0.0,
-        peak_grid_recharge=False,
-    )
-    f = pay_gs.loc[pay_gs.groupby("Cap_kWh")["Gain_CHF"].idxmax()] \
-              .sort_values("Cap_kWh").reset_index(drop=True)
-    f["frac_full_per_day"] = f.Cycles_per_year / 365.0
-    price_mid = (cost_price_lo + cost_price_hi) / 2
-    f["capex"] = cost_fixed + price_mid * f.Cap_kWh
-    f["payback_yr"] = f.capex / f.Gain_CHF.where(f.Gain_CHF > 0, np.nan)
-    rec_cap = float(best.Cap_kWh)
-    sel = f.Cap_kWh == rec_cap
-    rec_pb = float(f.payback_yr[sel].iloc[0]) if sel.any() and bool(f.payback_yr[sel].notna().any()) else float("nan")
-
-    # --- supportive verdict + metric strip, pointing at the one recommended size ---
-    st.success(T("pay_verdict", rec=f"{rec_cap:.0f}", cyc=f"{best.Cycles_per_year:.0f}"))
-    m = st.columns(3)
-    m[0].metric(T("pay_kpi_rec"), f"{rec_cap:.0f} kWh")
-    m[1].metric(T("kpi_savings"), T("savings_unit", v=f"{best.Gain_CHF:,.0f}"))
-    m[2].metric(T("pay_kpi_payback"), "n/a" if np.isnan(rec_pb) else T("pay_yr_val", v=f"{rec_pb:.0f}"))
-
-    # --- Lens 1: whole-system payback U-curve (fixed install + modules) ---
-    st.plotly_chart(_fig_payback(f, T, cost_life, rec_cap, cycles_low), use_container_width=True)
-    pb_cap = float(f.loc[f.payback_yr.idxmin(), "Cap_kWh"])
-    st.caption(T("pay_pb_caption", pb=f"{pb_cap:.0f}", rec=f"{rec_cap:.0f}"))
-
-    # --- Lens 2: cycles/yr + capacity-use (why the floor is a price-free shortcut) ---
-    st.plotly_chart(_fig_cycles(f, T, min_cycles_per_year, brand.cycles_high, rec_cap), use_container_width=True)
-    st.caption(T("pay_cycles_caption", low=int(min_cycles_per_year)))
-
-ts = df.timestamp.values
-with tab_soc:
-    usable_cap = getattr(sim, "usable_capacity_kWh", best.Cap_kWh)
-    soc_min = getattr(sim, "soc_min_pct", 0.0)
-    soc_pct = soc_min + (sim.soc / usable_cap * (100.0 - soc_min)) if usable_cap > 0 else sim.soc * 0
-    fig = go.Figure(go.Scatter(x=ts, y=soc_pct, mode="lines", line=dict(color="#7c3aed", width=1)))
-    if study_mode == "ci" and soc_min_pct > 0:
-        fig.add_hline(
-            y=soc_min_pct,
-            line_dash="dash",
-            annotation_text=f"Frontière Peak Shaving / autoconsommation : {reserve_boundary_pct:.0f} %",
+        fig = go.Figure()
+        if annual:
+            fig.add_hrect(
+            y0=min_cycles_per_year,
+            y1=cycles_high,
+            line_width=0,
+            fillcolor="green",
+            opacity=0.08,
+            yref="y2",
+            annotation_text="zone d'utilisation acceptable",
+            annotation_position="top left",
         )
-    fig.update_layout(
-        yaxis_title=T("axis_soc"),
-        xaxis_title=T("axis_date"),
-        yaxis=dict(range=[0, 100]),
-        height=420,
-        title=T("soc_title", cap=f"{best.Cap_kWh:.0f}", power=f"{best.Power_kW:.0f}"),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        fig.add_trace(go.Scatter(
+            x=f.Cap_kWh,
+            y=f.Gain_CHF,
+            name=T("legend_gain"),
+            mode="lines+markers",
+            line=dict(color="#2563eb"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=f.Cap_kWh,
+            y=f[cycles_col],
+            name="Cycles DC/an" if annual else "Cycles DC sur la période",
+            mode="lines+markers",
+            line=dict(color="#16a34a", dash="dot"),
+            yaxis="y2",
+        ))
+        fig.add_trace(go.Scatter(
+            x=[best.Cap_kWh],
+            y=[best.Gain_CHF],
+            name=T("legend_recommended"),
+            mode="markers",
+            marker=dict(size=16, color="#2563eb", symbol="star"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=[big.Cap_kWh],
+            y=[big.Gain_CHF],
+            name=T("legend_maxgain"),
+            mode="markers",
+            marker=dict(size=12, color="#dc2626", symbol="x"),
+        ))
+        fig.update_layout(
+            xaxis_title=T("axis_capacity"),
+            yaxis_title="Économie sur la période (CHF)",
+            yaxis2=dict(title=cycles_axis, overlaying="y", side="right"),
+            legend=dict(orientation="h", y=1.12),
+            height=450,
+            margin=dict(t=40),
+        )
+        st.plotly_chart(fig, width="stretch")
 
-with tab_cyc:
-    discharge = df.import_kWh.values - sim.import_after
-    usable_cap = getattr(sim, "usable_capacity_kWh", best.Cap_kWh)
-    cum_cycles = np.cumsum(discharge) / usable_cap if usable_cap > 0 else np.zeros_like(discharge)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=ts, y=cum_cycles, mode="lines", name=T("cyc_legend_cum"),
-                             line=dict(color="#16a34a")))
-    # straight reference line = perfectly steady cycling
-    fig.add_trace(go.Scatter(x=[ts[0], ts[-1]], y=[0, cum_cycles[-1]], mode="lines",
-                             name=T("cyc_legend_steady"), line=dict(color="#9ca3af", dash="dash")))
-    fig.update_layout(yaxis_title=T("cyc_axis"), xaxis_title=T("axis_date"), height=420,
-                      legend=dict(orientation="h", y=1.1), title=T("cyc_title"))
-    st.plotly_chart(fig, use_container_width=True)
+        marginal_floor = float(getattr(rec, "marginal_floor_chf_per_kwh", 0.0) or 0.0)
+        fig_marg = go.Figure()
+        fig_marg.add_trace(go.Bar(
+            x=f.Cap_kWh,
+            y=f.Marginal_CHF_per_kWh.fillna(0.0),
+            name="Gain du kWh ajouté",
+            hovertemplate="Capacité %{x:.0f} kWh : +%{y:.1f} CHF sur la période par kWh ajouté<extra></extra>",
+        ))
+        fig_marg.add_hline(
+            y=marginal_floor,
+            line_dash="dash",
+            line_color="#dc2626",
+            annotation_text="Seuil relatif : 30% de la référence lissée",
+            annotation_position="top right",
+        )
+        fig_marg.add_vline(
+            x=float(best.Cap_kWh),
+            line_color="#2563eb",
+            annotation_text=f"Recommandé : {best.Cap_kWh:g} kWh",
+            annotation_position="top left",
+        )
+        fig_marg.update_layout(
+            title="Gain marginal de chaque kWh de batterie ajouté",
+            xaxis_title="Capacité atteinte (kWh)",
+            yaxis_title="CHF sur la période par kWh ajouté",
+            height=330,
+            margin=dict(t=55),
+        )
+        st.plotly_chart(fig_marg, width="stretch")
+        st.caption(
+            f"Le repérage utilise une fenêtre fixe de {MODE_SETTINGS[mode]['window']:g} kWh et un seuil de 30% de la référence marginale lissée. Les cycles DC restent un contrôle technique."
+        )
 
-with tab_ba:
-    s = pd.DataFrame({"import_kWh": df.import_kWh.values, "export_kWh": df.export_kWh.values,
-                      "import_after": sim.import_after, "export_after": sim.export_after},
-                     index=pd.to_datetime(df.timestamp)).resample("MS").sum()
-    # Categorical month labels (not datetimes): grouped bars on a date axis render as
-    # near-invisible slivers, so use "YYYY-MM" strings to force a category axis.
-    months = s.index.strftime("%Y-%m")
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=months, y=s.import_kWh, name=T("ba_import_before"), marker_color="#fca5a5"))
-    fig.add_trace(go.Bar(x=months, y=s.import_after, name=T("ba_import_after"), marker_color="#dc2626"))
-    fig.add_trace(go.Bar(x=months, y=s.export_kWh, name=T("ba_export_before"), marker_color="#bfdbfe"))
-    fig.add_trace(go.Bar(x=months, y=s.export_after, name=T("ba_export_after"), marker_color="#2563eb"))
-    fig.update_layout(barmode="group", height=440, yaxis_title=T("ba_axis"),
-                      xaxis=dict(type="category"), legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(
+            f.assign(**{T("col_pct_max"): (f.Gain_CHF / rec.gain_max * 100).round(1) if rec.gain_max > 0 else np.nan})[
+                ["Cap_kWh", "Power_kW", "Gain_CHF", T("col_pct_max"),
+                 "Marginal_CHF_per_kWh", "Forward_marginal_CHF_per_kWh", cycles_col]
+            ].round(3),
+            width="stretch",
+            hide_index=True,
+        )
 
-# --------------------------------------------------------------------------- PDF
-st.divider()
-if not pdf_sections:
-    st.caption(T("pdf_sections_empty"))
+    with tab_pay:
+        f = rec.frontier.copy()
+        fixed = float(st.session_state.get("cost_fixed", 0.))
+        module = float(st.session_state.get("cost_module", 0.))
+        life = float(st.session_state.get("cost_life", 13.))
+        has_cost_model = fixed > 0 or module > 0
+        f["capex"] = fixed + module * f.Cap_kWh if has_cost_model else np.nan
+        f["payback_yr"] = f.capex / f.Gain_annual_CHF.where(f.Gain_annual_CHF > 0)
+        rec_pb = (fixed + module * sim.capacity_kWh) / sim.gain_annual_chf if has_cost_model and annual and sim.gain_annual_chf > 0 else simple_payback(capex, sim.gain_annual_chf)
+        st.success(f"Configuration étudiée : {sim.capacity_kWh:g} kWh. Les coûts renseignés servent à comparer les retours simples.")
+        m = st.columns(3)
+        m[0].metric("Capacité recommandée" if rec.recommended else "Capacité étudiée", f"{sim.capacity_kWh:g} kWh")
+        m[1].metric("Économies annuelles" if annual else "Économies sur la période", f"{_fmt(sim.gain_annual_chf if annual else sim.gain_chf)} CHF" + ("/an" if annual else ""))
+        m[2].metric("Retour simple", f"{rec_pb:.1f} ans" if rec_pb is not None else "n/a")
+        if f.payback_yr.notna().any():
+            st.plotly_chart(_fig_payback(f, T, life, sim.capacity_kWh, cycles_low), width="stretch")
+            st.caption("Comparaison avec le coût fixe et le prix par kWh renseignés, à profil et tarifs constants.")
+        else:
+            fig = go.Figure(go.Scatter(x=f.Cap_kWh, y=f.payback_yr, mode="lines+markers", line=dict(color="#7c3aed", width=3)))
+            fig.add_annotation(text="Renseigner les coûts à gauche et disposer de gains annuels positifs", x=.5, y=.5, xref="paper", yref="paper", showarrow=False)
+            fig.update_layout(title=T("pay_pb_title"), xaxis=dict(title=T("axis_capacity"), dtick=2), yaxis_title=T("pay_pb_axis"), template="plotly_white", height=380, margin=dict(t=60,r=50,l=60,b=50))
+            st.plotly_chart(fig, width="stretch")
+            st.caption("Aucun coût de batterie n'est présupposé. Un devis total ne suffit pas à comparer plusieurs capacités.")
+        days = sim.valid.sum() * sim.dt_hours / 24
+        f["frac_full_per_day"] = f.Cycles_period / days
+        if annual:
+            fig = _fig_cycles(f, T, cycles_low, cycles_high, sim.capacity_kWh)
+        else:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig.add_trace(go.Scatter(x=f.Cap_kWh, y=f.Cycles_period, name="Cycles DC sur la période", mode="lines+markers", line=dict(color="#0891b2", width=3)), secondary_y=False)
+            fig.add_trace(go.Scatter(x=f.Cap_kWh, y=f.frac_full_per_day, name="Cycles DC par jour simulé", mode="lines+markers", line=dict(color="#65a30d", width=2, dash="dot")), secondary_y=True)
+            fig.add_vline(x=sim.capacity_kWh, line_color="#16a34a")
+            fig.update_layout(xaxis=dict(title=T("axis_capacity"),dtick=2), template="plotly_white", height=380, legend=dict(orientation="h",y=1.13), margin=dict(t=60,r=70,l=60,b=50))
+            fig.update_yaxes(title_text=cycles_axis, secondary_y=False, color="#0891b2")
+            fig.update_yaxes(title_text="Cycles DC par jour simulé", secondary_y=True, color="#65a30d")
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Cycles calculés à partir de la décharge interne DC et de la capacité utile. Le seuil annuel s'applique uniquement aux périodes annualisées.")
+    df = frame
+    ts = frame.timestamp.dt.tz_convert("Europe/Zurich")
+    with tab_soc:
+        usable_cap = getattr(sim, "usable_capacity_kWh", best.Cap_kWh)
+        soc_min = getattr(sim, "soc_min_pct", 0.0)
+        soc_pct = sim.soc_pct
+        fig = go.Figure(go.Scatter(x=ts, y=soc_pct, mode="lines", line=dict(color="#7c3aed", width=1)))
+        if sim.soc_min_pct > 0:
+            fig.add_hline(
+                y=sim.soc_min_pct,
+                line_dash="dash",
+                annotation_text=f"SOC minimum : {sim.soc_min_pct:g} %",
+            )
+        fig.update_layout(
+            yaxis_title=T("axis_soc"),
+            xaxis_title=T("axis_date"),
+            yaxis=dict(range=[0, 100]),
+            height=420,
+            title=T("soc_title", cap=f"{best.Cap_kWh:.0f}", power=f"{best.Power_kW:.0f}"),
+        )
+        st.plotly_chart(fig, width="stretch")
 
-pdf_bytes = generate_battery_report(
-    df=df,
-    meta=meta,
-    rec=rec,
-    best=best,
-    big=big,
-    sim=sim,
-    brand=brand,
-    tariff_profile=tariff_profile,
-    tariff_import_ht=tariff_import_ht,
-    tariff_import_bt=tariff_import_bt,
-    tariff_export=tariff_export,
-    gain_share=gain_share,
-    gain_max_extra=gain_max_extra,
-    study_mode=study_mode,
-    show_financial=show_financial_in_report,
-    cost_life=cost_life,
-    sections=pdf_sections,
-    swissolar=swissolar,
-    client_name=client_name,
-)
+    with tab_cyc:
+        discharge = sim.discharge_by_interval / np.sqrt(sim.roundtrip_eff)
+        usable_cap = getattr(sim, "usable_capacity_kWh", best.Cap_kWh)
+        cum_cycles = np.nancumsum(discharge) / usable_cap if usable_cap > 0 else np.zeros_like(discharge)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=ts, y=np.where(sim.valid, cum_cycles, np.nan), mode="lines", name=T("cyc_legend_cum"),
+                                 line=dict(color="#16a34a")))
+        # straight reference line = perfectly steady cycling
+        fig.add_trace(go.Scatter(x=[ts.iloc[0], ts.iloc[-1]], y=[0, cum_cycles[-1]], mode="lines",
+                                 name=T("cyc_legend_steady"), line=dict(color="#9ca3af", dash="dash")))
+        fig.update_layout(yaxis_title="Cycles DC sur capacité utile", xaxis_title=T("axis_date"), height=420,
+                          legend=dict(orientation="h", y=1.1), title=T("cyc_title"))
+        st.plotly_chart(fig, width="stretch")
 
-st.download_button(
-    T("pdf_button"),
-    pdf_bytes,
-    file_name=T("pdf_filename"),
-    mime="application/pdf",
-)
+    with tab_ba:
+        s = monthly_before_after(frame, sim).rename(columns={"Import avant":"import_kWh", "Export avant":"export_kWh", "Import après":"import_after", "Export après":"export_after"})
+        months = s.index.astype(str)
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=months, y=s.import_kWh, name='Import avant', marker_color="#fca5a5"))
+        fig.add_trace(go.Bar(x=months, y=s.import_after, name='Import après', marker_color="#dc2626"))
+        fig.add_trace(go.Bar(x=months, y=s.export_kWh, name='Export avant', marker_color="#bfdbfe"))
+        fig.add_trace(go.Bar(x=months, y=s.export_after, name='Export après', marker_color="#2563eb"))
+        fig.update_layout(barmode="group", height=440, yaxis_title=T("ba_axis"),
+                          xaxis=dict(type="category"), legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig, width="stretch")
+
+
+
+def main():
+    st.set_page_config(page_title="Calculateur de batterie", page_icon="🔋", layout="wide")
+    st.markdown(ORIGINAL_CSS, unsafe_allow_html=True)
+    st.title("🔋 Calculateur V2")
+    st.caption(t("fr", "caption"))
+    st.sidebar.header("⚙️ Paramètres")
+    client = st.sidebar.text_input("Nom du client", placeholder="Ex. Jean Dupont", key="client_name")
+    st.sidebar.markdown("**Données**")
+    unit = st.sidebar.selectbox("Unité des données import/export", ["Automatique", "kWh", "kW", "Wh", "W"], key="data_unit")
+    st.sidebar.caption("kW/W = puissance moyenne convertie en kWh avec le pas de temps détecté. kWh/Wh = énergie déjà mesurée par intervalle.")
+    position = st.sidebar.selectbox("L'heure du fichier représente", ["Fin d'intervalle", "Début d'intervalle"],
+        key="timestamp_position", help="À vérifier auprès de l'exporteur. Exemple : 00h15 en fin d'intervalle décrit 00h00-00h15. Les index cumulés sont toujours affectés à la fin.")
+    with st.sidebar.expander("Horodatages et pas de mesure"):
+        ambiguous_label = st.selectbox("Heure d'automne isolée",
+            ["Automatique (heure suisse)", "Première occurrence (été)", "Seconde occurrence (hiver)", "Signaler l'ambiguïté"],
+            key="autumn_hour_policy",
+            help="Automatique : conserver les deux occurrences si elles sont fournies. Si une seule est présente sans offset, retenir la première (été) et signaler cette hypothèse à l'écran et dans le PDF.")
+        minute_label = st.selectbox("Pas de mesure (minutes)", ["Automatique", "5", "10", "15", "30", "60"], key="interval_minutes")
+        blank_label = st.selectbox("Cellules vides des exports Groupe E",
+            ["Automatique (convention de l'export)", "Toujours inconnues"], key="groupe_e_blank_policy",
+            help="Pour le modèle Excel Groupe E reconnu, une cellule vide est interprétée comme zéro si l'autre flux est mesuré. Les mentions Erroné/Manquant et les deux flux vides restent inconnus. Cette convention est signalée dans le rapport.")
+        aggregate_devices = st.checkbox("Huawei : additionner des compteurs distincts du même site", value=False, key="aggregate_devices",
+            help="À activer uniquement si les appareils mesurent des flux distincts à additionner. Ne pas additionner plusieurs appareils qui relisent le même compteur.")
+        st.caption("Les changements d'heure sont traités automatiquement. Les offsets fournis sont conservés ; les deux occurrences d'automne correctement renseignées restent distinctes.")
+    try:
+        tariffs = _tariff_settings()
+    except ValueError as error:
+        st.error(str(error))
+        return
+    st.sidebar.markdown("**Type d'étude**")
+    mode = st.sidebar.radio("Mode", list(MODE_SETTINGS), format_func=lambda m: MODE_SETTINGS[m]["label"], key="study_mode")
+    defaults = MODE_SETTINGS[mode]
+    show_financial = st.sidebar.checkbox("Afficher l'économie financière dans le PDF", value=mode == "ci", key=f"pdf_financial_{mode}")
+    eff = st.sidebar.slider("Rendement aller-retour", .50, 1., defaults["efficiency"], .01, key=f"eff_{mode}")
+    soc_min = st.sidebar.slider("SOC minimum (%)", 0, 95, int(defaults["soc_min"]), 1, key=f"soc_min_{mode}",
+        help="Limite basse de l'autoconsommation, à respecter selon le matériel. La capacité située sous cette limite n'est pas utilisée dans cette simulation.")
+    st.sidebar.caption(f"Plage utilisée : **{soc_min}-100 %**. Le SOC initial est fixé à {soc_min} %. Aucun gain de Peak Shaving n'est calculé.")
+    st.sidebar.markdown("**Plage de recherche**")
+    cl, ch, cs = defaults["capacity"]
+    pl, ph, ps = defaults["power"]
+    left, right = st.sidebar.columns(2)
+    cap_min = left.number_input("Cap. min (kWh)", min_value=.1, max_value=5000., value=cl, step=cs, key=f"cap_min_{mode}")
+    cap_max = right.number_input("Cap. max (kWh)", min_value=.1, max_value=5000., value=ch, step=cs, key=f"cap_max_{mode}")
+    p_min = left.number_input("P. min (kW)", min_value=.1, max_value=2500., value=pl, step=ps, key=f"p_min_{mode}")
+    p_max = right.number_input("P. max (kW)", min_value=.1, max_value=2500., value=ph, step=ps, key=f"p_max_{mode}")
+    st.sidebar.caption(f"Pas de calcul : {cs:g} kWh et {ps:g} kW. Ces bornes limitent la recherche ; les réglages sous le graphique limitent seulement l'affichage.")
+    if defaults["c_rate"] is not None:
+        st.sidebar.caption(f"Contrainte {defaults['c_rate']:g}C : puissance ≤ capacité nominale × {defaults['c_rate']:g}.")
+    with st.sidebar.expander("Critères et ordre des flux"):
+        cycles_floor = st.number_input("Seuil interne de cycles DC/an", min_value=0., value=defaults["cycles"], step=10., key=f"cycles_{mode}")
+        minimum_saving = st.number_input("Économie annuelle minimale pertinente (CHF/an)", min_value=0., value=10., step=10., key="minimum_saving")
+        st.caption("Critères d'étude à ajuster au projet ; aucune garantie constructeur n'en est déduite. Sans annualisation, le contrôle annuel des cycles est désactivé.")
+        order_label = st.selectbox("Ordre supposé dans un intervalle", ["Décharge puis charge", "Charge puis décharge"], key="dispatch_order")
+        st.caption("L'ordre réel des flux n'est pas connu avec des mesures agrégées. Le budget de temps du convertisseur est commun aux deux sens.")
+    try:
+        caps = fixed_grid(cap_min, cap_max, cs, cl)
+        powers = fixed_grid(p_min, p_max, ps, pl)
+    except ValueError as error:
+        st.error(str(error))
+        st.stop()
+    sections = ["frontier", "ba"]
+    uploaded = st.file_uploader(_original_label("uploader"), type=["xlsx", "xls", "csv"],
+                                accept_multiple_files=True, key="uploader")
+    if not uploaded:
+        st.info(_original_label("drop_prompt"))
+        return
+    options = list(range(len(uploaded))) + (["combine"] if len(uploaded) > 1 else [])
+    chosen = st.sidebar.selectbox("Courbe à analyser", options, key="dataset",
+        format_func=lambda i: "Combiner des périodes du même compteur" if i == "combine" else f"{i + 1}. {uploaded[i].name}")
+    same_meter = False
+    if chosen == "combine":
+        same_meter = st.sidebar.checkbox("Ces fichiers décrivent des périodes du même point de mesure (et non des clients différents).", key="same_meter")
+        if not same_meter:
+            st.info("Choisir une courbe ou préciser que les fichiers appartiennent au même point de mesure.")
+            return
+        active = uploaded
+    else:
+        active = [uploaded[chosen]]
+    files = tuple((f.name, f.getvalue()) for f in active)
+    ambiguous = {"Automatique (heure suisse)": "auto", "Signaler l'ambiguïté": "raise",
+                 "Première occurrence (été)": "daylight", "Seconde occurrence (hiver)": "standard"}[ambiguous_label]
+    try:
+        with st.spinner("Lecture et contrôle de la chronologie..."):
+            raw, raw_meta = _load_cached(files, "auto" if unit == "Automatique" else unit,
+                "end" if position == "Fin d'intervalle" else "start", ambiguous,
+                None if minute_label == "Automatique" else float(minute_label), same_meter, aggregate_devices,
+                "unknown" if blank_label == "Toujours inconnues" else "auto")
+    except (ValueError, OSError, KeyError) as error:
+        st.error(str(error))
+        return
+    st.caption(f"Jeu de données actif : **{raw_meta.source}**")
+    st.caption(f"Unité appliquée aux données : **{raw_meta.data_unit}**")
+    with st.sidebar.expander("📋 Qualité des données détectées", expanded=False):
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Période couverte", f"{raw_meta.coverage_days:.2f} jours")
+        q2.metric("Intervalles exploitables", f"{raw_meta.completeness:.2%}")
+        q3.metric("Intervalles invalides", raw_meta.invalid_rows)
+        q4.metric("Intervalles absents", raw_meta.absent_rows)
+        st.caption(f"Source : {raw_meta.source} | Unité source : {raw_meta.data_unit} | Pas : {raw_meta.dt_hours * 60:g} min | Données internes en kWh.")
+        if raw_meta.missing_periods:
+            with st.expander("Périodes manquantes (heures suisses)", expanded=False):
+                st.dataframe(pd.DataFrame(raw_meta.missing_periods), hide_index=True, width="stretch")
+        missing_policy = "block"
+        if raw_meta.completeness < 1:
+            with st.expander("Traitement avancé des données manquantes"):
+                treatment = st.radio("Traitement des données manquantes",
+                    ["Calculer les segments mesurés", "Estimer par jours comparables", "Attendre des données complètes"],
+                    key="gap_treatment")
+                st.caption("Par défaut, le calcul se poursuit sur les segments mesurés. Les trous restent inconnus et chaque reprise commence au SOC minimum.")
+            missing_policy = {"Attendre des données complètes": "block", "Calculer les segments mesurés": "segments", "Estimer par jours comparables": "estimate"}[treatment]
+        try:
+            frame, meta = prepare_simulation_data(raw, raw_meta, missing_policy)
+        except ValueError as error:
+            st.warning(str(error))
+            return
+        for warning in meta.warnings:
+            st.warning(warning)
+        annualize = st.checkbox("Calculer aussi un équivalent annuel sur 365 jours", value=meta.complete_year,
+            disabled=not meta.annualization_allowed, key=f"annualize_{meta.fingerprint}_{missing_policy}")
+        if not meta.annualization_allowed:
+            annualize = False
+            st.caption("Annualisation indisponible : il faut au moins 330 jours, les 12 mois représentés, 98 % de mesures et au moins 90 % par mois présent.")
+        elif annualize and not meta.complete_year:
+            st.warning("L'équivalent annuel est une extrapolation d'une période incomplète. Il ne reconstitue pas les mesures manquantes ni les effets saisonniers absents.")
+    with st.sidebar.expander("Tarifs appliqués à cette courbe", expanded=False):
+        try:
+            schedule, tariff_note = _calendar(meta, tariffs)
+        except ValueError as error:
+            st.error(str(error))
+            return
+    with st.sidebar.expander("Coût installé et retour simple (facultatif)"):
+        capex_input = st.number_input("Coût total installé de la configuration étudiée (CHF)", min_value=0., value=0., step=100., key="capex",
+            help="Zéro signifie non renseigné. Ce coût ne modifie pas le dimensionnement énergétique.")
+        st.caption("Aucun prix batterie n'est présupposé. Le retour simple suppose des tarifs et un profil constants.")
+        st.number_input("Coût fixe pour comparer les capacités (CHF)", min_value=0., value=0., step=100., key="cost_fixed")
+        st.number_input("Prix installé par kWh pour la comparaison (CHF/kWh)", min_value=0., value=0., step=50., key="cost_module")
+        st.number_input("Horizon de comparaison (ans)", min_value=1., value=13., step=1., key="cost_life")
+    capex = float(capex_input) if capex_input > 0 else None
+    options = dict(dt_hours=meta.dt_hours, roundtrip_eff=eff, tariff_import=tariffs["ht"],
+        tariff_export=tariffs["export"], coverage_days=meta.coverage_days, soc_min_pct=float(soc_min),
+        timestamps=frame.timestamp, tariff_import_ht=tariffs["ht"], tariff_import_bt=tariffs["bt"],
+        high_tariff_periods=tariffs["periods"], weekend_low_tariff=tariffs["weekend"],
+        valid_mask=frame.simulation_valid.to_numpy(bool), reset_before=frame.reset_before.to_numpy(bool),
+        annualize=bool(annualize), dispatch_order="discharge_first" if order_label == "Décharge puis charge" else "charge_first",
+        tariff_schedule=schedule)
+    imp, exp = frame.import_kWh.to_numpy(float), frame.export_kWh.to_numpy(float)
+    if not HAS_NUMBA:
+        st.info("Le moteur fonctionne sans accélération Numba ; une grande grille peut prendre plusieurs minutes.")
+    try:
+        with st.spinner("Simulation des configurations et dimensionnement..."):
+            results = _grid_cached(imp, exp, tuple(caps), tuple(powers), options, defaults["c_rate"])
+            rec = recommend(results, study_mode=mode, min_cycles_per_year=cycles_floor,
+                            minimum_annual_saving_chf=minimum_saving)
+            sim = _simulate_cached(imp, exp, float(rec.best.Cap_kWh), float(rec.best.Power_kW), options)
+    except ValueError as error:
+        st.error(str(error))
+        return
+    _render_original_summary(sim, rec, meta, mode)
+    if not rec.recommended:
+        st.warning("Configuration d'analyse : les critères ne permettent pas de valider un dimensionnement.")
+    for warning in recommendation_messages(rec):
+        st.warning(warning)
+    with st.sidebar.expander("Détail du dimensionnement et des hypothèses"):
+        for code, params in rec.notes:
+            st.caption(msg("fr", code, params))
+    assumptions = study_assumptions(sim, meta, rec, tariff_profile=tariffs["name"], tariff_year=tariffs["year"],
+        tariff_note=tariff_note + (" Référence : " + tariffs["note"] if tariffs["note"] else " Contrat non référencé."),
+        tariff_import_ht=tariffs["ht"], tariff_import_bt=tariffs["bt"], tariff_export=tariffs["export"],
+        periods=tariffs["periods"], weekend_low=tariffs["weekend"], tariff_schedule=schedule, capex_chf=capex)
+    with st.sidebar.expander("Hypothèses et qualité de l'étude"):
+        st.dataframe(pd.DataFrame(assumptions.items(), columns=["Paramètre", "Valeur"]), hide_index=True, width="stretch")
+    with st.expander("Détail du gain tarifaire", expanded=False):
+        st.dataframe(pd.DataFrame({
+            "Poste": ["Import évité haut tarif", "Import évité bas tarif", "Valeur de revente perdue", "Gain net batterie"],
+            "kWh sur la période": [sim.import_avoided_ht, sim.import_avoided_bt, sim.export_stored, np.nan],
+            "Tarif CHF/kWh": [sim.gain_ht_chf / sim.import_avoided_ht if sim.import_avoided_ht else 0., sim.gain_bt_chf / sim.import_avoided_bt if sim.import_avoided_bt else 0., sim.export_value_lost_chf / sim.export_stored if sim.export_stored else 0., np.nan],
+            "CHF sur la période": [sim.gain_ht_chf, sim.gain_bt_chf, -sim.export_value_lost_chf, sim.gain_chf],
+        }), hide_index=True, width="stretch")
+        st.caption(f"Formule : achats HT évités + achats BT évités - revente non perçue. Profil utilisé : {tariffs['name']}.")
+    st.divider()
+    render_energy_dashboard(frame, sim, rec.best)
+    _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_max, cycles_floor)
+    st.divider()
+    # Button controls report computation. Any changed study invalidates the prepared download.
+    identity = sha256(repr((meta.fingerprint, assumptions, rec.best.to_dict(), meta.warnings,
+                           tuple(caps), tuple(powers), defaults["c_rate"], rec.warnings, rec.notes,
+                           sections, show_financial, client, schedule)).encode()).hexdigest()
+    if st.session_state.get("report_identity") != identity:
+        st.session_state.pop("report_bytes", None)
+    if st.sidebar.button("Préparer le rapport PDF", key="prepare_pdf"):
+        with st.spinner("Création du rapport..."):
+            try:
+                st.session_state["report_bytes"] = generate_battery_report(df=frame, meta=meta, rec=rec, sim=sim,
+                    assumptions=assumptions, client_name=client, sections=sections, show_financial=show_financial,
+                    capex_chf=capex, tariff_schedule=schedule)
+                st.session_state["report_identity"] = identity
+            except (ValueError, OSError) as error:
+                st.error(f"Le PDF n'a pas pu être créé : {error}")
+    st.download_button(_original_label("pdf_button"), st.session_state.get("report_bytes", b""),
+                       _original_label("pdf_filename"), "application/pdf", key="download_pdf",
+                       disabled=st.session_state.get("report_bytes") is None)
+    st.sidebar.caption("Préparer le PDF pour activer son téléchargement en bas de page.")
+
+
+if __name__ == "__main__":
+    main()

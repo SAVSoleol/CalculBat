@@ -1,652 +1,334 @@
-"""Battery dispatch simulation + (cap, power) grid search.
+"""Moteur unique : autoconsommation immédiate, sans vieillissement ni auxiliaires.
 
-Dispatch model:
-  per interval, charge the battery from solar surplus, then discharge it to cover grid import,
-  respecting capacity, power and round-trip efficiency.
-
-Financial model:
-  The recommendation should be driven by tariff value, not battery price:
-      gain = import avoided at high tariff
-           + import avoided at low tariff
-           - export/sale revenue lost because this surplus was stored.
-
-Cycle definition:
-  equivalent_full_cycles = total energy discharged to load / usable battery capacity.
-  usable capacity = nameplate capacity x (1 - SOC_min).
+Les flux sont des kWh AC par intervalle. Le SOC interne est le stock DC au-dessus
+du SOC minimum. Charge et décharge partagent le temps du même convertisseur.
+L'énergie initiale utilisable est nulle. Aucun service Peak Shaving n'est simulé.
 """
-
 from __future__ import annotations
 
-# NOTE: Battery Sizer n'active plus le Peak Shaving. Les paramètres et fonctions\n# Peak Shaving restent dans ce moteur uniquement pour compatibilité technique et\n# réutilisation éventuelle par d'autres outils. L'étude Peak Shaving se fait dans\n# l'application dédiée Peak Shaving Simulator.\n\n
 from dataclasses import dataclass
 from typing import Iterable
-
 import numpy as np
 import pandas as pd
 
 try:
     from numba import njit
-
     HAS_NUMBA = True
-except Exception:  # pragma: no cover
+except ImportError:
     HAS_NUMBA = False
-
     def njit(*args, **kwargs):
-        def _wrap(fn):
-            return fn
+        return lambda function: function
 
-        return _wrap(args[0]) if args and callable(args[0]) else _wrap
+
+def _finite(value, label, minimum=None, maximum=None):
+    value = float(value)
+    if not np.isfinite(value) or (minimum is not None and value < minimum) or (
+            maximum is not None and value > maximum):
+        raise ValueError(f"{label} invalide : {value}.")
+    return value
+
+
+def _periods(periods):
+    result = tuple(tuple(float(v) for v in p) for p in periods)
+    for p in result:
+        if len(p) != 2 or not all(np.isfinite(v) and 0 <= v <= 24 and np.isclose(v * 60, round(v * 60)) for v in p) or p[0] == p[1]:
+            raise ValueError("Plage HT invalide : heures entre 0 et 24 à la minute entière, début différent de fin.")
+    return result
+
+
+def _high_mask(local, periods, weekend_low):
+    hour = local.hour + local.minute / 60 + local.second / 3600
+    mask = np.zeros(len(local), dtype=bool)
+    for start, end in periods:
+        mask |= ((hour >= start) & (hour < end)) if start < end else ((hour >= start) | (hour < end))
+    if weekend_low:
+        mask &= local.weekday < 5
+    return mask
+
+
+def _tariff_vectors(n, timestamps=None, tariff_import=.32, tariff_import_ht=None,
+                    tariff_import_bt=None, high_tariff_periods=((7., 22.),), weekend_low_tariff=False,
+                    *, dt_hours=.25, tariff_export=.06, tariff_schedule=None):
+    """Prix pondérés et fraction HT. Les plages s'appliquent en heure suisse.
+
+Intégration à la minute (données et limites tarifaires alignées à la minute).
+Un calendrier optionnel couvre chaque date avec start inclus / end exclu.
+"""
+    ht = _finite(tariff_import if tariff_import_ht is None else tariff_import_ht, "Tarif HT")
+    bt = _finite(tariff_import if tariff_import_bt is None else tariff_import_bt, "Tarif BT")
+    sell = _finite(tariff_export, "Tarif de reprise")
+    periods = _periods(high_tariff_periods)
+    if timestamps is None:
+        if tariff_schedule or ht != bt:
+            raise ValueError("Horodatages avec fuseau requis pour les tarifs variables.")
+        return np.full(n, ht), np.ones(n), np.full(n, sell), np.full(n, ht)
+    idx = pd.DatetimeIndex(timestamps)
+    if len(idx) != n or idx.tz is None or idx.hasnans or idx.has_duplicates or not idx.is_monotonic_increasing:
+        raise ValueError("Chronologie attendue : instants uniques, croissants, avec fuseau horaire.")
+    if (idx.second != 0).any() or (idx.microsecond != 0).any() or (idx.nanosecond != 0).any():
+        raise ValueError("Horodatages attendus à la minute entière.")
+    minutes = int(round(dt_hours * 60))
+    if minutes < 1 or not np.isclose(minutes, dt_hours * 60):
+        raise ValueError("Le pas doit être un nombre entier de minutes.")
+    schedule = []
+    for entry in tariff_schedule or []:
+        start, end = pd.Timestamp(entry["start"]), pd.Timestamp(entry["end"])
+        start = start.tz_localize("Europe/Zurich") if start.tzinfo is None else start.tz_convert("Europe/Zurich")
+        end = end.tz_localize("Europe/Zurich") if end.tzinfo is None else end.tz_convert("Europe/Zurich")
+        if end <= start:
+            raise ValueError("Fin de période tarifaire antérieure ou égale au début.")
+        if any(t.second or t.microsecond or t.nanosecond for t in (start, end)):
+            raise ValueError("Les limites du calendrier tarifaire doivent être alignées à la minute.")
+        schedule.append((start, end, _finite(entry["ht"], "HT calendrier"),
+                         _finite(entry["bt"], "BT calendrier"), _finite(entry["export"], "Reprise calendrier"),
+                         _periods(entry.get("periods", periods)), bool(entry.get("weekend_low", weekend_low_tariff))))
+    buy = np.zeros(n)
+    buy_ht = np.zeros(n)
+    high_fraction = np.zeros(n)
+    export = np.zeros(n)
+    for minute in range(minutes):
+        local = (idx + pd.Timedelta(minutes=minute, seconds=30)).tz_convert("Europe/Zurich")
+        if not schedule:
+            mask = _high_mask(local, periods, weekend_low_tariff)
+            buy += np.where(mask, ht, bt)
+            buy_ht += mask * ht
+            high_fraction += mask
+            export += sell
+        else:
+            covered = np.zeros(n, dtype=int)
+            for start, end, h, b, e, windows, weekend in schedule:
+                selected = (local >= start) & (local < end)
+                mask = _high_mask(local, windows, weekend)
+                covered += selected
+                buy += np.where(selected, np.where(mask, h, b), 0.)
+                buy_ht += (selected & mask) * h
+                high_fraction += selected & mask
+                export += selected * e
+            if (covered != 1).any():
+                raise ValueError("Le calendrier tarifaire comporte un trou ou un chevauchement sur la période de mesures.")
+    return buy / minutes, high_fraction / minutes, export / minutes, buy_ht / minutes
 
 
 @njit(cache=True)
-def _dispatch(imp, exp, capacity, power_per_step, eta):
-    """Inner loop. Returns import/export after battery, SOC, total charge, total discharge."""
-    n = imp.shape[0]
-    imp_after = np.empty(n)
-    exp_after = np.empty(n)
-    soc = np.empty(n)
-
-    soc_val = 0.0
-    charge_tot = 0.0
-    discharge_tot = 0.0
-
+def _dispatch(imp, exp, valid, resets, capacity, power_per_step, eta, charge_first):
+    n = len(imp)
+    after_i = np.full(n, np.nan)
+    after_e = np.full(n, np.nan)
+    soc = np.full(n, np.nan)
+    soc_start = np.full(n, np.nan)
+    stock = 0.0
+    discarded = 0.0
     for i in range(n):
-        # Charge from surplus
-        charge_i = exp[i]
-        if charge_i > power_per_step:
-            charge_i = power_per_step
-
-        max_charge = (capacity - soc_val) / eta
-        if charge_i > max_charge:
-            charge_i = max_charge
-        if charge_i < 0.0:
-            charge_i = 0.0
-
-        soc_val += charge_i * eta
-        exp_after[i] = exp[i] - charge_i
-        charge_tot += charge_i
-
-        # Discharge to cover grid import
-        discharge_i = imp[i]
-        if discharge_i > power_per_step:
-            discharge_i = power_per_step
-
-        max_discharge = soc_val * eta
-        if discharge_i > max_discharge:
-            discharge_i = max_discharge
-        if discharge_i < 0.0:
-            discharge_i = 0.0
-
-        soc_val -= discharge_i / eta
-        imp_after[i] = imp[i] - discharge_i
-        discharge_tot += discharge_i
-
-        soc[i] = soc_val
-
-    return imp_after, exp_after, soc, charge_tot, discharge_tot
-
-
-@njit(cache=True)
-def _dispatch_peak_shaving(imp, exp, capacity, power_per_step, eta, dt_hours, peak_target_kw, reserve_fraction, grid_recharge):
-    """Combined self-consumption + peak-shaving dispatch.
-
-    Priority:
-    1) charge from PV surplus;
-    2) shave import above ``peak_target_kw`` using all available SOC;
-    3) use only SOC above the configured reserve for ordinary self-consumption.
-
-    Optional controlled grid charging can maintain the peak-shaving reserve without
-    exceeding the configured grid-power target.
-    """
-    n = imp.shape[0]
-    imp_after = np.empty(n)
-    exp_after = np.empty(n)
-    soc = np.empty(n)
-
-    reserve_energy = capacity * reserve_fraction
-    # A C&I peak-shaving controller normally starts with its reserve available.
-    # This avoids making the result depend on the arbitrary first timestamp of the file.
-    soc_val = reserve_energy
-    charge_tot = 0.0
-    discharge_tot = 0.0
-    peak_step = peak_target_kw * dt_hours
-
-    for i in range(n):
-        charge_i = exp[i]
-        if charge_i > power_per_step:
-            charge_i = power_per_step
-        max_charge = (capacity - soc_val) / eta
-        if charge_i > max_charge:
-            charge_i = max_charge
-        if charge_i < 0.0:
-            charge_i = 0.0
-
-        soc_val += charge_i * eta
-        exp_after[i] = exp[i] - charge_i
-        charge_tot += charge_i
-
-        # Keep the reserve topped up from the grid when there is headroom below the
-        # target. This is not energy arbitrage: grid charging stops at the reserve
-        # level and never creates a new peak above the configured target.
-        grid_charge_i = 0.0
-        if grid_recharge and soc_val < reserve_energy and imp[i] < peak_step:
-            headroom = peak_step - imp[i]
-            missing_input = (reserve_energy - soc_val) / eta
-            grid_charge_i = headroom
-            if grid_charge_i > power_per_step:
-                grid_charge_i = power_per_step
-            if grid_charge_i > missing_input:
-                grid_charge_i = missing_input
-            if grid_charge_i < 0.0:
-                grid_charge_i = 0.0
-            soc_val += grid_charge_i * eta
-
-        import_with_grid_charge = imp[i] + grid_charge_i
-
-        # First priority: shave the part of the interval above the target.
-        peak_need = import_with_grid_charge - peak_step
-        if peak_need < 0.0:
-            peak_need = 0.0
-        if peak_need > power_per_step:
-            peak_need = power_per_step
-
-        max_discharge_full = soc_val * eta
-        discharge_peak = peak_need
-        if discharge_peak > max_discharge_full:
-            discharge_peak = max_discharge_full
-
-        soc_val -= discharge_peak / eta
-        remaining_import = import_with_grid_charge - discharge_peak
-
-        # Second priority: ordinary self-consumption, but preserve the reserve.
-        normal_power_left = power_per_step - discharge_peak
-        available_above_reserve = soc_val - reserve_energy
-        if available_above_reserve < 0.0:
-            available_above_reserve = 0.0
-        normal_soc_available = available_above_reserve * eta
-
-        discharge_normal = remaining_import
-        if discharge_normal > normal_power_left:
-            discharge_normal = normal_power_left
-        if discharge_normal > normal_soc_available:
-            discharge_normal = normal_soc_available
-        if discharge_normal < 0.0:
-            discharge_normal = 0.0
-
-        soc_val -= discharge_normal / eta
-        discharge_i = discharge_peak + discharge_normal
-        imp_after[i] = import_with_grid_charge - discharge_i
-        discharge_tot += discharge_i
-        soc[i] = soc_val
-
-    return imp_after, exp_after, soc, charge_tot, discharge_tot
+        if not valid[i]:
+            continue
+        if resets[i]:
+            discarded += stock
+            stock = 0.0
+        soc_start[i] = stock
+        if charge_first:
+            charge = max(0., min(exp[i], power_per_step, (capacity - stock) / eta))
+            stock += charge * eta
+            discharge = max(0., min(imp[i], power_per_step - charge, stock * eta))
+            stock -= discharge / eta
+        else:
+            # Default: no use of surplus that has not yet arrived in this interval.
+            discharge = max(0., min(imp[i], power_per_step, stock * eta))
+            stock -= discharge / eta
+            charge = max(0., min(exp[i], power_per_step - discharge, (capacity - stock) / eta))
+            stock += charge * eta
+        after_i[i] = imp[i] - discharge
+        after_e[i] = exp[i] - charge
+        soc[i] = stock
+    return after_i, after_e, soc, soc_start, discarded, stock
 
 
 @dataclass
 class SimResult:
     capacity_kWh: float
     power_kW: float
-
     soc: np.ndarray
+    soc_start: np.ndarray
     import_after: np.ndarray
     export_after: np.ndarray
-
     import_before: float
     export_before: float
-
     import_avoided: float
     import_avoided_ht: float
     import_avoided_bt: float
-
     export_stored: float
-
     gain_chf: float
     gain_ht_chf: float
     gain_bt_chf: float
     export_value_lost_chf: float
-
-    peak_shaving_enabled: bool
-    peak_target_kW: float | None
-    peak_reserve_pct: float
-    peak_before_kW: float
-    peak_after_kW: float
-    peak_reduction_kW: float
-    peak_savings_chf: float
-    peak_billing_mode: str
-    peak_power_tariff_chf_per_kw_month: float
-
+    cycles_period: float
     cycles_per_year: float
+    cycles_nominal_period: float
     usable_capacity_kWh: float
     soc_min_pct: float
     charge_total_kWh: float
     discharge_total_kWh: float
-
     surplus_captured: float
     import_reduction: float
+    conversion_losses_kWh: float
+    untransferred_stock_kWh: float
+    final_stock_kWh: float
+    peak_before_kW: float
+    peak_after_kW: float
+    dt_hours: float
+    roundtrip_eff: float
+    coverage_days: float
+    annual_factor: float | None
+    gain_annual_chf: float | None
+    dispatch_order: str
+    valid: np.ndarray
+    reset_before: np.ndarray
+    gain_by_interval: np.ndarray
+    charge_by_interval: np.ndarray
+    discharge_by_interval: np.ndarray
 
     @property
-    def import_after_total(self) -> float:
-        return float(self.import_after.sum())
+    def import_after_total(self):
+        return float(np.nansum(self.import_after))
 
     @property
-    def export_after_total(self) -> float:
-        return float(self.export_after.sum())
+    def export_after_total(self):
+        return float(np.nansum(self.export_after))
+
+    @property
+    def soc_pct(self):
+        return self.soc_min_pct + self.soc / self.capacity_kWh * 100
 
 
-def _as_datetime_index(timestamps) -> pd.DatetimeIndex | None:
-    if timestamps is None:
-        return None
-    try:
-        idx = pd.to_datetime(timestamps, errors="coerce")
-        if len(idx) == 0 or pd.isna(idx).all():
-            return None
-        return pd.DatetimeIndex(idx)
-    except Exception:
-        return None
+def _prepare(import_kWh, export_kWh, dt_hours, roundtrip_eff, tariff_import, tariff_export,
+             coverage_days=None, soc_min_pct=5., timestamps=None, tariff_import_ht=None,
+             tariff_import_bt=None, high_tariff_periods=((7., 22.),), weekend_low_tariff=False,
+             *, valid_mask=None, reset_before=None, annualize=False, dispatch_order="discharge_first",
+             tariff_schedule=None):
+    imp, exp = np.asarray(import_kWh, dtype=float), np.asarray(export_kWh, dtype=float)
+    if imp.ndim != 1 or exp.ndim != 1 or imp.shape != exp.shape or len(imp) == 0:
+        raise ValueError("Import et export doivent être deux vecteurs non vides de même longueur.")
+    dt = _finite(dt_hours, "Pas de temps", 1 / 60, 24)
+    eff = _finite(roundtrip_eff, "Rendement aller-retour", 1e-9, 1.)
+    soc = _finite(soc_min_pct, "SOC minimum", 0., 99.999)
+    valid = np.ones(len(imp), dtype=bool) if valid_mask is None else np.asarray(valid_mask, dtype=bool)
+    if valid.shape != imp.shape or not valid.any():
+        raise ValueError("Masque de validité incorrect ou aucune mesure utilisable.")
+    if not np.isfinite(imp[valid]).all() or not np.isfinite(exp[valid]).all() or (
+            imp[valid] < 0).any() or (exp[valid] < 0).any():
+        raise ValueError("Les intervalles utilisables exigent des énergies finies et positives ou nulles.")
+    auto_reset = valid & ~np.r_[False, valid[:-1]]
+    resets = auto_reset.copy() if reset_before is None else np.asarray(reset_before, dtype=bool)
+    if resets.shape != valid.shape or not np.all(resets[auto_reset]) or (resets & ~valid).any():
+        raise ValueError("Chaque segment mesuré doit redémarrer au SOC minimum.")
+    if timestamps is not None:
+        idx = pd.DatetimeIndex(timestamps)
+        if len(idx) != len(imp) or (len(idx) > 1 and not np.allclose(np.diff(idx.asi8) / 3.6e12, dt)):
+            raise ValueError("La chronologie doit comporter chaque intervalle, y compris les trous masqués.")
+    days = len(imp) * dt / 24
+    if coverage_days is not None and not np.isclose(float(coverage_days), days, rtol=0, atol=1e-5):
+        raise ValueError("La couverture ne correspond pas au nombre d'intervalles et au pas de temps.")
+    if annualize and (days < 330 or valid.mean() < .98):
+        raise ValueError("Annualisation insuffisamment représentative : au moins 330 jours et 98 % d'intervalles requis.")
+    if dispatch_order not in {"discharge_first", "charge_first"}:
+        raise ValueError("Ordre des flux inconnu.")
+    buy, high, sell, buy_ht = _tariff_vectors(len(imp), timestamps, tariff_import, tariff_import_ht, tariff_import_bt,
+                                    high_tariff_periods, weekend_low_tariff, dt_hours=dt,
+                                    tariff_export=tariff_export, tariff_schedule=tariff_schedule)
+    return dict(imp=np.ascontiguousarray(imp), exp=np.ascontiguousarray(exp), valid=valid, resets=resets,
+                dt=dt, eff=eff, eta=np.sqrt(eff), soc_min=soc, days=days, buy=buy, high=high, sell=sell,
+                buy_ht=buy_ht, buy_bt=buy-buy_ht,
+                annual_factor=365 / days if annualize else None, order=dispatch_order)
 
 
-def _is_high_tariff(ts: pd.Timestamp, high_tariff_periods, weekend_low_tariff: bool) -> bool:
-    if pd.isna(ts):
-        return True
-
-    if weekend_low_tariff and ts.weekday() >= 5:
-        return False
-
-    hour = ts.hour + ts.minute / 60.0 + ts.second / 3600.0
-    for start, end in high_tariff_periods:
-        # Normal same-day window, e.g. 07:00 -> 22:00
-        if start <= end:
-            if start <= hour < end:
-                return True
-        # Overnight window, e.g. 22:00 -> 06:00
-        else:
-            if hour >= start or hour < end:
-                return True
-
-    return False
-
-
-def _tariff_vectors(
-    n: int,
-    timestamps=None,
-    tariff_import: float = 0.32,
-    tariff_import_ht: float | None = None,
-    tariff_import_bt: float | None = None,
-    high_tariff_periods=((7.0, 22.0),),
-    weekend_low_tariff: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return tariff vector and boolean masks for HT/BT.
-
-    Backward-compatible behaviour:
-    - if timestamps are not supplied, all intervals use `tariff_import`;
-    - if HT/BT are not supplied, they fall back to `tariff_import`.
-    """
-
-    if tariff_import_ht is None:
-        tariff_import_ht = tariff_import
-    if tariff_import_bt is None:
-        tariff_import_bt = tariff_import
-
-    idx = _as_datetime_index(timestamps)
-
-    # Existing app.py currently passes only arrays, not timestamps.
-    # In that case we preserve the old single-tariff behaviour.
-    if idx is None or len(idx) != n:
-        tariffs = np.full(n, float(tariff_import), dtype=np.float64)
-        ht_mask = np.ones(n, dtype=bool)
-        bt_mask = np.zeros(n, dtype=bool)
-        return tariffs, ht_mask, bt_mask
-
-    ht_mask = np.array(
-        [_is_high_tariff(ts, high_tariff_periods, weekend_low_tariff) for ts in idx],
-        dtype=bool,
-    )
-    bt_mask = ~ht_mask
-
-    tariffs = np.where(ht_mask, float(tariff_import_ht), float(tariff_import_bt)).astype(np.float64)
-    return tariffs, ht_mask, bt_mask
+def _run(context, capacity_kWh, power_kW):
+    c = context
+    cap = _finite(capacity_kWh, "Capacité", 1e-9)
+    power = _finite(power_kW, "Puissance", 1e-9)
+    usable = cap * (1 - c["soc_min"] / 100)
+    ia, ea, soc, soc_start, discarded, final = _dispatch(
+        c["imp"], c["exp"], c["valid"], c["resets"], usable, power * c["dt"], c["eta"], c["order"] == "charge_first")
+    discharge, charge = c["imp"] - ia, c["exp"] - ea
+    charge_total, discharge_total = float(np.nansum(charge)), float(np.nansum(discharge))
+    import_before = float(c["imp"][c["valid"]].sum())
+    export_before = float(c["exp"][c["valid"]].sum())
+    # Price-weighted HT/BT shares, including intervals crossing a tariff boundary.
+    gain_import = discharge * c["buy"]
+    gain_by_interval = gain_import - charge * c["sell"]
+    gain = float(np.nansum(gain_by_interval))
+    ht_value = float(np.nansum(discharge * c["buy_ht"]))
+    bt_value = float(np.nansum(discharge * c["buy_bt"]))
+    cycles = discharge_total / c["eta"] / usable
+    losses = charge_total * (1 - c["eta"]) + discharge_total * (1 / c["eta"] - 1)
+    af = c["annual_factor"]
+    return SimResult(cap, power, soc, soc_start, ia, ea, import_before, export_before, discharge_total,
+        float(np.nansum(discharge * c["high"])), float(np.nansum(discharge * (1 - c["high"]))),
+        charge_total, gain, ht_value, bt_value, float(np.nansum(charge * c["sell"])), cycles,
+        cycles * af if af is not None else np.nan, discharge_total / c["eta"] / cap,
+        usable, c["soc_min"], charge_total, discharge_total,
+        charge_total / export_before if export_before else 0.,
+        discharge_total / import_before if import_before else 0., losses, float(discarded), float(final),
+        float(np.max(c["imp"][c["valid"]]) / c["dt"]), float(np.nanmax(ia) / c["dt"]),
+        c["dt"], c["eff"], c["days"], af, gain * af if af is not None else None, c["order"],
+        c["valid"], c["resets"], gain_by_interval, charge, discharge)
 
 
-
-def _peak_power_savings(
-    imp: np.ndarray,
-    imp_after: np.ndarray,
-    dt_hours: float,
-    timestamps,
-    tariff_chf_per_kw_month: float,
-    billing_mode: str,
-) -> tuple[float, float, float, float]:
-    """Return annual peak-power saving and peak diagnostics.
-
-    billing_mode:
-    - "annual_band": the highest 15-min demand of the analysed year defines one
-      billed power band for the whole year. Saving = reduced annual peak x tariff x 12.
-    - "monthly_max": each month's maximum demand is billed independently.
-
-    The tariff input remains in CHF/kW/month in both modes.
-    """
-    if len(imp) == 0 or dt_hours <= 0:
-        return 0.0, 0.0, 0.0, 0.0
-
-    before_kw = np.asarray(imp, dtype=float) / float(dt_hours)
-    after_kw = np.asarray(imp_after, dtype=float) / float(dt_hours)
-
-    peak_before_kw = float(np.max(before_kw))
-    peak_after_kw = float(np.max(after_kw))
-    peak_reduction_kw = max(0.0, peak_before_kw - peak_after_kw)
-
-    tariff = max(0.0, float(tariff_chf_per_kw_month))
-    mode = str(billing_mode or "annual_band").lower()
-
-    if tariff <= 0:
-        return 0.0, peak_before_kw, peak_after_kw, peak_reduction_kw
-
-    if mode == "annual_band":
-        saving = peak_reduction_kw * tariff * 12.0
-        return float(saving), peak_before_kw, peak_after_kw, peak_reduction_kw
-
-    idx = _as_datetime_index(timestamps)
-    if idx is None or len(idx) != len(imp):
-        return 0.0, peak_before_kw, peak_after_kw, peak_reduction_kw
-
-    monthly = pd.DataFrame({
-        "month": idx.to_period("M"),
-        "before_kw": before_kw,
-        "after_kw": after_kw,
-    })
-    monthly_peaks = monthly.groupby("month")[["before_kw", "after_kw"]].max()
-    monthly_reduction = (
-        monthly_peaks["before_kw"] - monthly_peaks["after_kw"]
-    ).clip(lower=0.0)
-    saving = float(monthly_reduction.sum() * tariff)
-    return saving, peak_before_kw, peak_after_kw, peak_reduction_kw
-
-def simulate(
-    import_kWh: np.ndarray,
-    export_kWh: np.ndarray,
-    capacity_kWh: float,
-    power_kW: float,
-    dt_hours: float,
-    roundtrip_eff: float,
-    tariff_import: float,
-    tariff_export: float,
-    coverage_days: float | None = None,
-    soc_min_pct: float = 5.0,
-    timestamps=None,
-    tariff_import_ht: float | None = None,
-    tariff_import_bt: float | None = None,
-    high_tariff_periods=((7.0, 22.0),),
-    weekend_low_tariff: bool = False,
-    peak_shaving_enabled: bool = False,
-    peak_target_kW: float | None = None,
-    peak_power_tariff_chf_per_kw_month: float = 0.0,
-    peak_billing_mode: str = "annual_band",
-    peak_reserve_pct: float = 30.0,
-    peak_grid_recharge: bool = True,
-) -> SimResult:
-    """Run one battery simulation.
-
-    Financial gain is calculated from avoided import at the interval tariff minus the
-    export revenue lost when surplus is stored instead of sold.
-    """
-
-    imp = np.ascontiguousarray(import_kWh, dtype=np.float64)
-    exp = np.ascontiguousarray(export_kWh, dtype=np.float64)
-
-    if imp.shape[0] != exp.shape[0]:
-        raise ValueError("import_kWh and export_kWh must have the same length.")
-
-    eta = float(np.sqrt(roundtrip_eff))
-    power_per_step = float(power_kW * dt_hours)
-
-    usable_capacity_kWh = float(capacity_kWh) * (1.0 - float(soc_min_pct) / 100.0)
-    usable_capacity_kWh = max(usable_capacity_kWh, 0.0)
-
-    peak_active = bool(peak_shaving_enabled and peak_target_kW is not None and float(peak_target_kW) >= 0.0)
-    if peak_active:
-        reserve_fraction = min(max(float(peak_reserve_pct) / 100.0, 0.0), 1.0)
-        imp_after, exp_after, soc, charge_tot, discharge_tot = _dispatch_peak_shaving(
-            imp, exp, usable_capacity_kWh, power_per_step, eta, float(dt_hours),
-            float(peak_target_kW), reserve_fraction, bool(peak_grid_recharge)
-        )
-    else:
-        imp_after, exp_after, soc, charge_tot, discharge_tot = _dispatch(
-            imp, exp, usable_capacity_kWh, power_per_step, eta
-        )
-
-    avoided_by_interval = imp - imp_after
-    stored_by_interval = exp - exp_after
-
-    tariffs, ht_mask, bt_mask = _tariff_vectors(
-        len(imp),
-        timestamps=timestamps,
-        tariff_import=tariff_import,
-        tariff_import_ht=tariff_import_ht,
-        tariff_import_bt=tariff_import_bt,
-        high_tariff_periods=high_tariff_periods,
-        weekend_low_tariff=weekend_low_tariff,
-    )
-
-    import_avoided_ht = float(avoided_by_interval[ht_mask].sum())
-    import_avoided_bt = float(avoided_by_interval[bt_mask].sum())
-
-    gain_import = float((avoided_by_interval * tariffs).sum())
-    export_value_lost = float(stored_by_interval.sum() * tariff_export)
-
-    peak_savings_chf, peak_before_kw, peak_after_kw, peak_reduction_kw = _peak_power_savings(
-        imp,
-        imp_after,
-        dt_hours,
-        timestamps,
-        peak_power_tariff_chf_per_kw_month,
-        peak_billing_mode,
-    ) if peak_active else (
-        0.0,
-        float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0,
-        float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0,
-        max(
-            0.0,
-            (float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0)
-            - (float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0),
-        ),
-    )
-
-    # Battery Sizer: energy/autoconsumption gain only. Peak-Shaving CHF is calculated in the dedicated simulator.
-    peak_savings_chf = 0.0
-    gain = gain_import - export_value_lost
-
-    gain_ht = float(import_avoided_ht * (tariff_import_ht if tariff_import_ht is not None else tariff_import))
-    gain_bt = float(import_avoided_bt * (tariff_import_bt if tariff_import_bt is not None else tariff_import))
-
-    import_before = float(imp.sum())
-    export_before = float(exp.sum())
-    import_avoided = float(discharge_tot)
-    export_stored = float(charge_tot)
-
-    days = coverage_days if coverage_days and coverage_days > 0 else len(imp) * dt_hours / 24.0
-    cycles_total = discharge_tot / usable_capacity_kWh if usable_capacity_kWh > 0 else 0.0
-    cycles_per_year = cycles_total * 365.0 / days if days > 0 else 0.0
-
-    surplus_captured = (export_stored / export_before) if export_before > 0 else 0.0
-    import_reduction = (import_avoided / import_before) if import_before > 0 else 0.0
-
-    return SimResult(
-        capacity_kWh=float(capacity_kWh),
-        power_kW=float(power_kW),
-        soc=soc,
-        import_after=imp_after,
-        export_after=exp_after,
-        import_before=import_before,
-        export_before=export_before,
-        import_avoided=import_avoided,
-        import_avoided_ht=import_avoided_ht,
-        import_avoided_bt=import_avoided_bt,
-        export_stored=export_stored,
-        gain_chf=float(gain),
-        gain_ht_chf=float(gain_ht),
-        gain_bt_chf=float(gain_bt),
-        export_value_lost_chf=export_value_lost,
-        peak_shaving_enabled=peak_active,
-        peak_target_kW=float(peak_target_kW) if peak_active else None,
-        peak_reserve_pct=float(peak_reserve_pct),
-        peak_before_kW=peak_before_kw,
-        peak_after_kW=peak_after_kw,
-        peak_reduction_kW=peak_reduction_kw,
-        peak_savings_chf=peak_savings_chf,
-        peak_billing_mode=str(peak_billing_mode),
-        peak_power_tariff_chf_per_kw_month=float(peak_power_tariff_chf_per_kw_month),
-        cycles_per_year=float(cycles_per_year),
-        usable_capacity_kWh=float(usable_capacity_kWh),
-        soc_min_pct=float(soc_min_pct),
-        charge_total_kWh=float(charge_tot),
-        discharge_total_kWh=float(discharge_tot),
-        surplus_captured=float(surplus_captured),
-        import_reduction=float(import_reduction),
-    )
+def simulate(import_kWh, export_kWh, capacity_kWh, power_kW, dt_hours, roundtrip_eff,
+             tariff_import, tariff_export, coverage_days=None, soc_min_pct=5., timestamps=None,
+             tariff_import_ht=None, tariff_import_bt=None, high_tariff_periods=((7., 22.),),
+             weekend_low_tariff=False, *, valid_mask=None, reset_before=None, annualize=False,
+             dispatch_order="discharge_first", tariff_schedule=None):
+    return _run(_prepare(import_kWh, export_kWh, dt_hours, roundtrip_eff, tariff_import, tariff_export,
+        coverage_days, soc_min_pct, timestamps, tariff_import_ht, tariff_import_bt, high_tariff_periods,
+        weekend_low_tariff, valid_mask=valid_mask, reset_before=reset_before, annualize=annualize,
+        dispatch_order=dispatch_order, tariff_schedule=tariff_schedule), capacity_kWh, power_kW)
 
 
-def grid_search(
-    import_kWh: np.ndarray,
-    export_kWh: np.ndarray,
-    caps: Iterable,
-    powers: Iterable,
-    dt_hours: float,
-    roundtrip_eff: float,
-    tariff_import: float,
-    tariff_export: float,
-    coverage_days: float | None = None,
-    soc_min_pct: float = 5.0,
-    timestamps=None,
-    tariff_import_ht: float | None = None,
-    tariff_import_bt: float | None = None,
-    high_tariff_periods=((7.0, 22.0),),
-    weekend_low_tariff: bool = False,
-    max_c_rate: float | None = None,
-    peak_shaving_enabled: bool = False,
-    peak_target_kW: float | None = None,
-    peak_power_tariff_chf_per_kw_month: float = 0.0,
-    peak_billing_mode: str = "annual_band",
-    peak_reserve_pct: float = 30.0,
-    peak_grid_recharge: bool = True,
-) -> pd.DataFrame:
-    """Simulate every valid (capacity, power) pair.
+def result_row(sim):
+    return {"Cap_kWh": sim.capacity_kWh, "Power_kW": sim.power_kW, "Gain_CHF": sim.gain_chf,
+        "Gain_annual_CHF": sim.gain_annual_chf, "Gain_import_HT_CHF": sim.gain_ht_chf,
+        "Gain_import_BT_CHF": sim.gain_bt_chf, "Export_value_lost_CHF": sim.export_value_lost_chf,
+        "Import_avoided_kWh": sim.import_avoided, "Export_stored_kWh": sim.export_stored,
+        "Cycles_period": sim.cycles_period, "Cycles_per_year": sim.cycles_per_year,
+        "Cycles_nominal_period": sim.cycles_nominal_period, "Usable_capacity_kWh": sim.usable_capacity_kWh,
+        "SOC_min_pct": sim.soc_min_pct, "Losses_kWh": sim.conversion_losses_kWh,
+        "Final_stock_kWh": sim.final_stock_kWh, "Untransferred_stock_kWh": sim.untransferred_stock_kWh,
+        "Peak_before_kW": sim.peak_before_kW, "Peak_after_kW": sim.peak_after_kW}
 
-    If max_c_rate is set, combinations above Power_kW = Cap_kWh * max_c_rate
-    are excluded from the search. Example: max_c_rate=0.5 enforces a 0.5C battery.
 
-    Returns a table with total tariff-based gain and the underlying HT/BT components.
-    """
-
-    imp = np.ascontiguousarray(import_kWh, dtype=np.float64)
-    exp = np.ascontiguousarray(export_kWh, dtype=np.float64)
-
-    if imp.shape[0] != exp.shape[0]:
-        raise ValueError("import_kWh and export_kWh must have the same length.")
-
-    eta = float(np.sqrt(roundtrip_eff))
-    days = coverage_days if coverage_days and coverage_days > 0 else len(imp) * dt_hours / 24.0
-
-    tariffs, ht_mask, bt_mask = _tariff_vectors(
-        len(imp),
-        timestamps=timestamps,
-        tariff_import=tariff_import,
-        tariff_import_ht=tariff_import_ht,
-        tariff_import_bt=tariff_import_bt,
-        high_tariff_periods=high_tariff_periods,
-        weekend_low_tariff=weekend_low_tariff,
-    )
-
-    ht_price = tariff_import_ht if tariff_import_ht is not None else tariff_import
-    bt_price = tariff_import_bt if tariff_import_bt is not None else tariff_import
-
-    rows = []
-
+def grid_search(import_kWh, export_kWh, caps: Iterable, powers: Iterable, dt_hours, roundtrip_eff,
+                tariff_import, tariff_export, coverage_days=None, soc_min_pct=5., timestamps=None,
+                tariff_import_ht=None, tariff_import_bt=None, high_tariff_periods=((7., 22.),),
+                weekend_low_tariff=False, max_c_rate=None, *, valid_mask=None, reset_before=None,
+                annualize=False, dispatch_order="discharge_first", tariff_schedule=None):
+    caps = sorted(set(_finite(v, "Capacité", 1e-9) for v in caps))
+    powers = sorted(set(_finite(v, "Puissance", 1e-9) for v in powers))
+    if not caps or not powers:
+        raise ValueError("Plage de capacité ou puissance vide.")
+    rate = None if max_c_rate is None else _finite(max_c_rate, "C-rate", 1e-9)
+    pairs = []
     for cap in caps:
-        for p in powers:
-            # Optional C-rate constraint.
-            # Example 0.5C: 200 kWh -> max 100 kW, 1000 kWh -> max 500 kW.
-            if max_c_rate is not None and float(p) > float(cap) * float(max_c_rate) + 1e-9:
-                continue
-
-            usable_cap = float(cap) * (1.0 - float(soc_min_pct) / 100.0)
-            usable_cap = max(usable_cap, 0.0)
-
-            peak_active = bool(peak_shaving_enabled and peak_target_kW is not None and float(peak_target_kW) >= 0.0)
-            if peak_active:
-                reserve_fraction = min(max(float(peak_reserve_pct) / 100.0, 0.0), 1.0)
-                imp_after, exp_after, _, charge_tot, discharge_tot = _dispatch_peak_shaving(
-                    imp, exp, usable_cap, float(p) * dt_hours, eta, float(dt_hours),
-                    float(peak_target_kW), reserve_fraction, bool(peak_grid_recharge)
-                )
-            else:
-                imp_after, exp_after, _, charge_tot, discharge_tot = _dispatch(
-                    imp, exp, usable_cap, float(p) * dt_hours, eta
-                )
-
-            avoided_by_interval = imp - imp_after
-            stored_by_interval = exp - exp_after
-
-            import_avoided_ht = float(avoided_by_interval[ht_mask].sum())
-            import_avoided_bt = float(avoided_by_interval[bt_mask].sum())
-            export_stored = float(stored_by_interval.sum())
-
-            gain_import = float((avoided_by_interval * tariffs).sum())
-            export_value_lost = float(export_stored * tariff_export)
-
-            peak_savings_chf, peak_before_kw, peak_after_kw, peak_reduction_kw = _peak_power_savings(
-                imp,
-                imp_after,
-                dt_hours,
-                timestamps,
-                peak_power_tariff_chf_per_kw_month,
-                peak_billing_mode,
-            ) if peak_active else (
-                0.0,
-                float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0,
-                float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0,
-                max(
-                    0.0,
-                    (float(imp.max() / dt_hours) if len(imp) and dt_hours > 0 else 0.0)
-                    - (float(imp_after.max() / dt_hours) if len(imp_after) and dt_hours > 0 else 0.0),
-                ),
-            )
-
-            # Battery Sizer recommendation must not be influenced by Peak-Shaving CHF.
-            peak_savings_chf = 0.0
-            gain = gain_import - export_value_lost
-
-            cycles_year = (
-                discharge_tot / usable_cap * 365.0 / days
-                if (usable_cap > 0 and days > 0)
-                else 0.0
-            )
-
-            rows.append(
-                {
-                    "Cap_kWh": float(cap),
-                    "Power_kW": float(p),
-                    "Gain_CHF": float(gain),
-                    "Gain_import_HT_CHF": float(import_avoided_ht * ht_price),
-                    "Gain_import_BT_CHF": float(import_avoided_bt * bt_price),
-                    "Export_value_lost_CHF": float(export_value_lost),
-                    "Peak_savings_CHF": float(peak_savings_chf),
-                    "Peak_before_kW": float(peak_before_kw),
-                    "Peak_after_kW": float(peak_after_kw),
-                    "Peak_reduction_kW": float(peak_reduction_kw),
-                    "Peak_target_kW": float(peak_target_kW) if peak_active else np.nan,
-                    "Peak_billing_mode": str(peak_billing_mode),
-                    "Import_avoided_kWh": float(discharge_tot),
-                    "Import_avoided_HT_kWh": float(import_avoided_ht),
-                    "Import_avoided_BT_kWh": float(import_avoided_bt),
-                    "Export_stored_kWh": float(export_stored),
-                    "Cycles_per_year": float(cycles_year),
-                    "Usable_capacity_kWh": float(usable_cap),
-                    "SOC_min_pct": float(soc_min_pct),
-                }
-            )
-
-    return pd.DataFrame(rows)
+        limit = min(powers[-1], cap * rate) if rate else powers[-1]
+        if limit < powers[0] - 1e-9:
+            continue
+        allowed = [p for p in powers if p <= limit + 1e-9]
+        # Exact C-rate endpoint avoids artificial alternating plateaus in the gain curve.
+        allowed = sorted(set(allowed + [limit]))
+        pairs.extend((cap, p) for p in allowed)
+    if not pairs:
+        raise ValueError("Aucune combinaison admissible avec ces limites de puissance et de C-rate.")
+    if len(pairs) > 30_000:
+        raise ValueError("Grille trop grande (maximum 30 000 combinaisons). Réduire les limites techniques.")
+    c = _prepare(import_kWh, export_kWh, dt_hours, roundtrip_eff, tariff_import, tariff_export, coverage_days,
+        soc_min_pct, timestamps, tariff_import_ht, tariff_import_bt, high_tariff_periods, weekend_low_tariff,
+        valid_mask=valid_mask, reset_before=reset_before, annualize=annualize, dispatch_order=dispatch_order,
+        tariff_schedule=tariff_schedule)
+    return pd.DataFrame([result_row(_run(c, cap, p)) for cap, p in pairs])
 
 
-if __name__ == "__main__":
-    print("simulation.py OK")
+def simple_payback(capex_chf, annual_gain_chf):
+    """Retour simple sans actualisation ; absent si coût ou gain annuel inexploitable."""
+    if capex_chf is None or annual_gain_chf is None:
+        return None
+    cost = _finite(capex_chf, "Coût installé", 0.)
+    gain = _finite(annual_gain_chf, "Économie annuelle")
+    return cost / gain if cost > 0 and gain > 0 else None
