@@ -1,10 +1,11 @@
-streamlit==1.58.0
-pandas==3.0.3
-numpy==2.4.6
-plotly==6.8.0
-matplotlib==3.11.0
+# Environnement de validation : Python 3.12. Versions directes testées ensemble.
+streamlit==1.63.0
+numpy==2.3.5
+pandas==2.2.3
 openpyxl==3.1.5
-fpdf2==2.8.7
-xlsxwriter==3.2.9
-numba==0.65.1
-llvmlite==0.47.0
+xlrd==2.0.1
+matplotlib==3.10.8
+plotly==7.0.0
+fpdf2==2.8.8
+# Accélération de la simulation ; le code fonctionne aussi sans Numba.
+numba==0.67.0

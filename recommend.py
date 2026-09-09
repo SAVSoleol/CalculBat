@@ -1,73 +1,22 @@
-"""Battery recommendation based on tariff value and diminishing marginal returns.
+"""Dimensionnement par valeur marginale : heuristique énergétique, sans CAPEX caché.
 
-The physical and financial simulation is performed in simulation.py. This module then:
-1. keeps the best power for each battery capacity;
-2. calculates the extra annual saving delivered by each added kWh;
-3. stops when the next added capacity no longer delivers enough annual value;
-4. verifies that the selected battery still reaches the internal cycle floor.
-
-Swissolar remains a separate plausibility reference in app.py. It does not directly force
-or cap the simulated recommendation.
+La grille physique est fixe par mode. La fenêtre de lissage est exprimée en kWh,
+et la référence de seuil est lissée de la même manière. Les seuils de cycles sont
+des critères internes sur la capacité utile, pas des garanties constructeur.
 """
-
 from __future__ import annotations
-
 from dataclasses import dataclass, field
-
 import numpy as np
 import pandas as pd
 
-Msg = tuple[str, dict]
-
-CYCLES_HEALTHY_LOW = 250.0
-CYCLES_HEALTHY_HIGH = 300.0
-CYCLES_OVERSIZED_BELOW = 150.0
-
-MODE_CYCLES_LOW = {
-    "residential": 150.0,
-    "autoconsommation": 150.0,
-    "pme": 130.0,
-    "ci": 100.0,
-    "c&i": 100.0,
-    "industrie": 100.0,
-    "industrial": 100.0,
-    "c_i": 100.0,
+MODE_SETTINGS = {
+    "residential": {"label": "Résidentiel", "capacity": (5., 50., 1.), "power": (1., 20., 1.),
+                    "efficiency": .92, "soc_min": 5., "c_rate": None, "cycles": 150., "window": 5.},
+    "pme": {"label": "PME", "capacity": (50., 150., 5.), "power": (5., 100., 5.),
+            "efficiency": .88, "soc_min": 5., "c_rate": .5, "cycles": 130., "window": 20.},
+    "ci": {"label": "C&I / Industrie", "capacity": (150., 1000., 10.), "power": (20., 500., 10.),
+           "efficiency": .80, "soc_min": 30., "c_rate": .5, "cycles": 100., "window": 50.},
 }
-
-
-@dataclass(frozen=True)
-class BrandSpec:
-    key: str
-    name: str
-    cycles_low: float
-    cycles_high: float
-    oversized_below: float
-    design_cycles_yr: float
-    sources: tuple[tuple[str, str], ...]
-
-
-GOODWE = BrandSpec(
-    key="goodwe",
-    name="GoodWe Lynx D (GW8.3-BAT)",
-    cycles_low=250.0,
-    cycles_high=350.0,
-    oversized_below=150.0,
-    design_cycles_yr=1000.0,
-    sources=(),
-)
-
-HUAWEI = BrandSpec(
-    key="huawei",
-    name="Huawei (LUNA2000)",
-    cycles_low=250.0,
-    cycles_high=300.0,
-    oversized_below=150.0,
-    design_cycles_yr=263.0,
-    sources=(),
-)
-
-BRANDS: dict[str, BrandSpec] = {GOODWE.key: GOODWE, HUAWEI.key: HUAWEI}
-DEFAULT_BRAND = GOODWE
 
 
 @dataclass
@@ -76,247 +25,137 @@ class Recommendation:
     frontier: pd.DataFrame
     max_gain_pick: pd.Series
     gain_max: float
-    knee_capacity_kWh: float | None = None
-    knee_gain_chf: float | None = None
-    knee_method: str = "marginal_value"
-    study_mode: str = "autoconsommation"
-    recommended_min_kWh: float | None = None
-    recommended_max_kWh: float | None = None
-    recommendation_score: float | None = None
-    marginal_floor_chf_per_kwh: float | None = None
-    selected_marginal_chf_per_kwh: float | None = None
-    next_marginal_chf_per_kwh: float | None = None
-    limiting_reason: str | None = None
-    warnings: list[Msg] = field(default_factory=list)
-    notes: list[Msg] = field(default_factory=list)
+    study_mode: str
+    limiting_reason: str
+    marginal_floor_chf_per_kwh: float
+    selected_marginal_chf_per_kwh: float | None
+    next_marginal_chf_per_kwh: float | None
+    recommended_min_kWh: float
+    recommended_max_kWh: float
+    recommended: bool
+    power_gain_share: float = .99
+    warnings: list[tuple[str, dict]] = field(default_factory=list)
+    notes: list[tuple[str, dict]] = field(default_factory=list)
 
 
-def _best_per_capacity(results: pd.DataFrame) -> pd.DataFrame:
-    """Return the highest-gain power option for each tested capacity."""
-    idx = results.groupby("Cap_kWh")["Gain_CHF"].idxmax()
-    return results.loc[idx].sort_values("Cap_kWh").reset_index(drop=True)
+def fixed_grid(low, high, step, anchor):
+    """Fixed physical lattice plus the exact requested technical endpoints."""
+    values = [float(low), float(high), float(step), float(anchor)]
+    if not np.isfinite(values).all() or low <= 0 or high < low or step <= 0:
+        raise ValueError("Limites techniques invalides.")
+    first = anchor + np.ceil((low - anchor) / step) * step
+    count = max(0, int(np.floor((high - first) / step)) + 1)
+    if count > 10_000:
+        raise ValueError("Trop de points de grille.")
+    return sorted(set([float(low), float(high)] + np.round(first + np.arange(count) * step, 9).tolist()))
 
 
-def _marginal_diagnostics(frontier: pd.DataFrame, mode: str, absolute_floor: float = 0.0) -> tuple[pd.DataFrame, float]:
-    """Calculate gain delivered by every additional kWh and the stopping threshold.
+def best_per_capacity(results, power_gain_share=.99):
+    if not 0 < power_gain_share <= 1:
+        raise ValueError("Part de gain cible attendue entre 0 et 1.")
+    rows = []
+    for _, group in results.groupby("Cap_kWh", sort=True):
+        gain_max = float(group.Gain_CHF.max())
+        target = gain_max * power_gain_share if gain_max > 0 else gain_max
+        options = group[group.Gain_CHF >= target - 1e-9].sort_values(["Power_kW", "Gain_CHF"], ascending=[True, False])
+        row = options.iloc[0].copy()
+        row["Max_gain_at_capacity_CHF"] = gain_max
+        rows.append(row)
+    return pd.DataFrame(rows).reset_index(drop=True)
 
-    The threshold is relative to the client curve: 30% of the strongest observed
-    marginal gain. This avoids a fixed CHF threshold that would behave differently
-    for small and large projects. A two-step forward average prevents one noisy
-    capacity step from moving the result.
-    """
+
+def _marginal_diagnostics(frontier, window_kwh=5., relative_factor=.30):
     f = frontier.sort_values("Cap_kWh").reset_index(drop=True).copy()
-    f["Gain_mono"] = f["Gain_CHF"].cummax()
-
-    dcap = f["Cap_kWh"].diff()
-    f["Marginal_CHF_per_kWh"] = (f["Gain_mono"].diff() / dcap).replace([np.inf, -np.inf], np.nan)
-
-    valid = f["Marginal_CHF_per_kWh"].dropna().clip(lower=0.0)
-    peak = float(valid.max()) if not valid.empty else 0.0
-    relative_factor = 0.30
+    x = f.Cap_kWh.to_numpy(float)
+    raw = f.Max_gain_at_capacity_CHF.to_numpy(float)
+    y = np.maximum.accumulate(raw)
+    right = np.minimum(x + window_kwh, x[-1])
+    dx = right - x
+    forward = np.divide(np.interp(right, x, y) - y, dx, out=np.full(len(x), np.nan), where=dx > 1e-9)
+    # Same window for both the strongest marginal value and the stopping criterion.
+    full = dx >= window_kwh - 1e-9
+    reference = forward[full] if full.any() else forward[np.isfinite(forward)]
+    peak = max(0., float(reference.max())) if len(reference) else 0.
     floor = peak * relative_factor
-
-    # Value of capacity added AFTER the current row.
-    next_1 = f["Marginal_CHF_per_kWh"].shift(-1)
-    next_2 = f["Marginal_CHF_per_kWh"].shift(-2)
-    f["Forward_marginal_2step"] = pd.concat([next_1, next_2], axis=1).mean(axis=1, skipna=True)
+    f["Gain_envelope_CHF"] = y
+    f["Forward_marginal_CHF_per_kWh"] = forward
     f["Marginal_floor_CHF_per_kWh"] = floor
-    f["Marginal_peak_CHF_per_kWh"] = peak
-    f["Marginal_relative"] = (f["Marginal_CHF_per_kWh"] / peak).clip(lower=0.0) if peak > 0 else 0.0
-    f["Forward_marginal_relative_2step"] = (f["Forward_marginal_2step"] / peak).clip(lower=0.0) if peak > 0 else 0.0
     return f, floor
 
 
-def _marginal_pick(
-    frontier: pd.DataFrame,
-    mode: str,
-    min_cycles: float,
-    absolute_floor: float,
-) -> tuple[pd.Series, pd.DataFrame, float, str]:
-    """Select the last capacity before added kWh lose sufficient annual value."""
-    f, floor = _marginal_diagnostics(frontier, mode, absolute_floor)
-    if f.empty:
-        raise ValueError("frontier is empty")
-
-    min_cycles = max(0.0, float(min_cycles))
-    cycle_ok = f["Cycles_per_year"] >= min_cycles
-
-    # Start from the smallest tested capacity and stop before the first capacity for
-    # which the following one/two kWh fall below the marginal-value threshold.
-    chosen_idx = int(f.index[0])
-    reason = "marginal_value"
-    for i in range(len(f)):
-        if not bool(cycle_ok.iloc[i]):
-            reason = "cycles"
-            break
-
-        chosen_idx = i
-        forward = f.loc[i, "Forward_marginal_2step"]
-        if pd.notna(forward) and float(forward) < floor:
-            reason = "marginal_value"
-            break
-
-    # Never retain a capacity below the cycle floor when a smaller eligible row exists.
-    eligible_idx = f.index[cycle_ok].tolist()
-    if eligible_idx:
-        chosen_idx = min(chosen_idx, max(eligible_idx))
-    else:
-        chosen_idx = int(f["Cycles_per_year"].idxmax())
-        reason = "no_cycle_candidate"
-
-    chosen = f.loc[chosen_idx]
-    cap = float(chosen["Cap_kWh"])
-    source_row = frontier.loc[np.isclose(frontier["Cap_kWh"], cap)].iloc[0]
-    return source_row, f, floor, reason
-
-
-def _offer_range(
-    diagnostics: pd.DataFrame,
-    selected_cap: float,
-    min_cycles: float,
-    marginal_floor: float,
-) -> tuple[float, float]:
-    """Build a practical range of one module below/above the central result.
-
-    The adjacent capacity is included only when it remains technically eligible and its
-    marginal value is not completely collapsed. This produces ranges such as 10-12 kWh
-    around an 11 kWh central result, without extending into the flat tail of the curve.
-    """
-    f = diagnostics.sort_values("Cap_kWh").reset_index(drop=True)
-    matches = f.index[np.isclose(f["Cap_kWh"], float(selected_cap))].tolist()
-    if not matches:
-        return float(selected_cap), float(selected_cap)
-
-    i = int(matches[0])
-    lo = hi = float(selected_cap)
-    min_cycles = max(0.0, float(min_cycles))
-
-    if i > 0:
-        prev = f.iloc[i - 1]
-        if float(prev["Cycles_per_year"]) >= min_cycles:
-            lo = float(prev["Cap_kWh"])
-
-    if i + 1 < len(f):
-        nxt = f.iloc[i + 1]
-        nxt_marg = float(nxt["Marginal_CHF_per_kWh"]) if pd.notna(nxt["Marginal_CHF_per_kWh"]) else 0.0
-        if float(nxt["Cycles_per_year"]) >= min_cycles and nxt_marg >= 0.60 * marginal_floor:
-            hi = float(nxt["Cap_kWh"])
-
-    return lo, hi
-
-
-def _ci_pick(frontier: pd.DataFrame, gain_max: float, cycles_low: float, gain_share: float = 0.95) -> pd.Series:
-    """Keep the existing saturation logic for C&I studies."""
-    f = frontier.sort_values("Cap_kWh").reset_index(drop=True).copy()
-    f["Gain_mono"] = f["Gain_CHF"].cummax()
-    candidates = f[f["Gain_mono"] >= float(gain_max) * float(gain_share)]
-    if candidates.empty:
-        return f.loc[f["Gain_CHF"].idxmax()]
-    healthy = candidates[candidates["Cycles_per_year"] >= float(cycles_low)]
-    return healthy.iloc[0] if not healthy.empty else candidates.iloc[0]
-
-
-def recommend(
-    results: pd.DataFrame,
-    gain_threshold: float = 0.90,
-    cycles_low: float | None = None,
-    coverage_days: float | None = None,
-    brand: BrandSpec = DEFAULT_BRAND,
-    marginal_gain_floor_chf_per_kwh: float = 5.0,
-    knee_window_kwh: float = 5.0,
-    min_gain_share: float = 0.85,
-    study_mode: str = "autoconsommation",
-    ci_gain_share: float = 0.95,
-    min_cycles_per_year: float = 0.0,
-) -> Recommendation:
-    """Recommend a battery using marginal annual value rather than a geometric knee."""
-    if results.empty:
-        raise ValueError("results table is empty.")
-
-    warnings: list[Msg] = []
-    notes: list[Msg] = []
-    mode = str(study_mode or "autoconsommation").lower()
-    frontier_raw = _best_per_capacity(results)
-
-    max_gain_pick = results.sort_values(
-        ["Gain_CHF", "Cap_kWh", "Power_kW"], ascending=[False, True, True]
-    ).iloc[0]
-    gain_max = float(max_gain_pick["Gain_CHF"])
-
-    if cycles_low is None:
-        cycles_low = MODE_CYCLES_LOW.get(mode, brand.cycles_low)
-    min_cycles = max(0.0, float(min_cycles_per_year or cycles_low))
-
-    if gain_max <= 0:
-        best = frontier_raw.iloc[0]
-        diagnostics, marginal_floor = _marginal_diagnostics(
-            frontier_raw, mode, marginal_gain_floor_chf_per_kwh
-        )
+def recommend(results, *, study_mode="residential", min_cycles_per_year=None,
+              power_gain_share=.99, marginal_relative_floor=.30, window_kwh=None,
+              minimum_annual_saving_chf=10.):
+    required = ["Cap_kWh", "Power_kW", "Gain_CHF", "Cycles_per_year"]
+    if results.empty or any(c not in results for c in required):
+        raise ValueError("Aucun résultat exploitable pour le dimensionnement.")
+    if study_mode not in MODE_SETTINGS:
+        raise ValueError("Mode d'étude inconnu.")
+    numeric = results[["Cap_kWh", "Power_kW", "Gain_CHF"]].to_numpy(float)
+    if not np.isfinite(numeric).all() or (numeric[:, :2] <= 0).any():
+        raise ValueError("Résultats non finis ou capacités/puissances invalides.")
+    settings = MODE_SETTINGS[study_mode]
+    window = settings["window"] if window_kwh is None else float(window_kwh)
+    min_cycles = settings["cycles"] if min_cycles_per_year is None else float(min_cycles_per_year)
+    if not np.isfinite([window, min_cycles, marginal_relative_floor, minimum_annual_saving_chf]).all() or (
+            window <= 0 or min_cycles < 0 or minimum_annual_saving_chf < 0 or not 0 < marginal_relative_floor <= 1):
+        raise ValueError("Seuils de dimensionnement invalides.")
+    frontier = best_per_capacity(results, power_gain_share)
+    f, floor = _marginal_diagnostics(frontier, window, marginal_relative_floor)
+    best_max = results.sort_values(["Gain_CHF", "Cap_kWh", "Power_kW"], ascending=[False, True, True]).iloc[0]
+    gain_max = float(best_max.Gain_CHF)
+    warnings, notes = [], []
+    annual_known = np.isfinite(f.Cycles_per_year.to_numpy(float)).all()
+    eligible = f.Cycles_per_year >= min_cycles if annual_known else pd.Series(True, index=f.index)
+    if not annual_known:
+        warnings.append(("cycles_unavailable", {}))
+    if gain_max <= 1e-9:
+        chosen = 0
         reason = "no_savings"
         warnings.append(("no_savings", {}))
+        recommended = False
+    elif not eligible.any():
+        chosen = int(f.Cycles_per_year.idxmax())
+        reason = "no_cycle_candidate"
+        warnings.append(("no_healthy", {"cycles_low": min_cycles}))
+        recommended = False
     else:
-        best, diagnostics, marginal_floor, reason = _marginal_pick(
-            frontier_raw,
-            mode=mode,
-            min_cycles=min_cycles,
-            absolute_floor=marginal_gain_floor_chf_per_kwh,
-        )
-
-    selected_cap = float(best["Cap_kWh"])
-    rec_min = rec_max = selected_cap
-    rec_min, rec_max = _offer_range(diagnostics, selected_cap, min_cycles, marginal_floor)
-
-    row_idx = diagnostics.index[np.isclose(diagnostics["Cap_kWh"], selected_cap)].tolist()
-    selected_marginal = None
-    next_marginal = None
-    if row_idx:
-        i = int(row_idx[0])
-        val = diagnostics.loc[i, "Marginal_CHF_per_kWh"]
-        selected_marginal = float(val) if pd.notna(val) else None
-        if i + 1 < len(diagnostics):
-            val2 = diagnostics.loc[i + 1, "Marginal_CHF_per_kWh"]
-            next_marginal = float(val2) if pd.notna(val2) else None
-
-    cyc = float(best.get("Cycles_per_year", 0.0))
-    band = {"low": float(min_cycles), "high": float(brand.cycles_high)}
-    if cyc < min_cycles:
-        warnings.append(("no_healthy", {"cycles_low": min_cycles, "cyc": cyc}))
-    elif cyc <= brand.cycles_high:
-        notes.append(("within_band", {"cyc": cyc, **band}))
-    else:
-        notes.append(("above_band", {"cyc": cyc, **band}))
-
-    peak_marginal = float(diagnostics["Marginal_peak_CHF_per_kWh"].iloc[0]) if not diagnostics.empty else 0.0
-    next_ratio = (float(next_marginal or 0.0) / peak_marginal) if peak_marginal > 0 else 0.0
-    notes.append(("marginal_stop", {
-        "relative_floor": 0.30,
-        "next_ratio": next_ratio,
-        "next": float(next_marginal or 0.0),
-    }))
-
-    if coverage_days is not None and coverage_days < 360:
-        warnings.append(("partial_year", {"days": float(coverage_days)}))
-
-    return Recommendation(
-        best=best,
-        frontier=diagnostics,
-        max_gain_pick=max_gain_pick,
-        gain_max=gain_max,
-        knee_capacity_kWh=None,
-        knee_gain_chf=None,
-        knee_method="marginal_value",
-        study_mode=mode,
-        recommended_min_kWh=rec_min,
-        recommended_max_kWh=rec_max,
-        recommendation_score=float(best["Gain_CHF"] / gain_max) if gain_max > 0 else None,
-        marginal_floor_chf_per_kwh=float(marginal_floor),
-        selected_marginal_chf_per_kwh=selected_marginal,
-        next_marginal_chf_per_kwh=next_marginal,
-        limiting_reason=reason,
-        warnings=warnings,
-        notes=notes,
-    )
-
-
-if __name__ == "__main__":
-    print("recommend.py OK")
+        # Stop on diminishing returns, but examine ALL cycle-eligible capacities.
+        indices = f.index[eligible].tolist()
+        chosen = indices[-1]
+        reason = "upper_bound"
+        for i in indices:
+            forward = f.loc[i, "Forward_marginal_CHF_per_kWh"]
+            if np.isfinite(forward) and (forward <= 1e-9 or forward < floor):
+                chosen = i
+                reason = "marginal_value"
+                break
+        if chosen == indices[-1] and indices[-1] < len(f) - 1 and reason == "upper_bound":
+            reason = "cycles"
+        recommended = True
+    best = f.loc[chosen].copy()
+    if best.Gain_CHF <= 1e-9:
+        recommended = False
+        if reason != "no_savings":
+            warnings.append(("no_savings", {}))
+    annual_gain = pd.to_numeric(pd.Series([best.get("Gain_annual_CHF")]), errors="coerce").iloc[0]
+    if pd.notna(annual_gain) and annual_gain < minimum_annual_saving_chf:
+        warnings.append(("negligible_gain", {"threshold": minimum_annual_saving_chf}))
+        recommended = False
+    if chosen == len(f) - 1 and reason != "no_savings":
+        warnings.append(("upper_bound", {}))
+    if chosen == 0 and reason != "no_savings":
+        warnings.append(("lower_bound", {}))
+    if (np.diff(f.Max_gain_at_capacity_CHF) < -1e-6).any():
+        warnings.append(("non_monotone", {}))
+    if annual_known and eligible.any():
+        notes.append(("cycles_definition", {"cycles_low": min_cycles}))
+    notes.append(("heuristic", {"window": window, "floor": 100 * marginal_relative_floor,
+                                 "power_share": 100 * power_gain_share}))
+    # Neighbouring grid points are not commercial battery modules: no invented offer range.
+    marginal = best.Forward_marginal_CHF_per_kWh
+    next_value = f.loc[chosen + 1, "Forward_marginal_CHF_per_kWh"] if chosen + 1 < len(f) else np.nan
+    return Recommendation(best, f, best_max, gain_max, study_mode, reason, floor,
+        float(marginal) if np.isfinite(marginal) else None,
+        float(next_value) if np.isfinite(next_value) else None,
+        float(best.Cap_kWh), float(best.Cap_kWh), recommended, power_gain_share, warnings, notes)

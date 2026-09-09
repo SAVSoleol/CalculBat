@@ -1,1074 +1,255 @@
-"""PDF report generation for Battery Sizer.
-
-Creates a clean 3-page A4 report:
-1. executive summary
-2. charts
-3. detailed analysis
-"""
-
+"""Rapport PDF modulaire : mêmes résultats, hypothèses et alertes que l'interface."""
 from __future__ import annotations
-
 from io import BytesIO
 from pathlib import Path
-
+import numpy as np
+import pandas as pd
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import pandas as pd
 from fpdf import FPDF
+from fpdf.enums import XPos, YPos
+
+from i18n import recommendation_messages, msg
+from simulation import simple_payback
+
+ROOT = Path(__file__).resolve().parent
+ORANGE = (233, 78, 53)
+GRAY = (85, 95, 110)
+BLUE = "#2563eb"
+SECTION_LABELS = {"frontier": "Dimensionnement", "payback": "Retour simple",
+                  "soc": "État de charge", "cycles": "Cycles équivalents", "ba": "Flux mensuels"}
 
 
-SOLEOL_ORANGE = (233, 78, 53)
-DARK = (0, 0, 0)
-TEXT = (35, 35, 35)
-MUTED = (100, 110, 120)
-BLUE = (37, 99, 235)
-GREEN = (34, 160, 85)
-ORANGE = (245, 130, 32)
-PURPLE = (126, 58, 242)
-LIGHT_BG = (248, 250, 252)
-LIGHT_ORANGE = (255, 244, 239)
-LIGHT_GREEN = (236, 253, 245)
-BORDER = (220, 225, 230)
-
-CARD_TITLE_SIZE = 7
-CARD_VALUE_SIZE = 14
-CARD_SUB_SIZE = 7
-SIDEBAR_LABEL_SIZE = 7.5
-SIDEBAR_VALUE_SIZE = 8.2
-FOOTER_SIZE = 7
+def _tx(value):
+    value = str(value)
+    for source, target in {"–": "-", "—": "-", "’": "'", "œ": "oe", "→": "->",
+                           "≤": "<=", "≥": ">=", "≠": "différent de", "…": "...", "\u202f": " "}.items():
+        value = value.replace(source, target)
+    return value.encode("latin-1", "replace").decode("latin-1")
 
 
-def _tx(s) -> str:
-    repl = {
-        "—": "-",
-        "–": "-",
-        "→": "->",
-        "≥": ">=",
-        "≤": "<=",
-        "≈": "~",
-        "•": "-",
-        "✅": "",
-        "⚠️": "!",
-        "’": "'",
-        "œ": "oe",
-        "…": "...",
-        "é": "é",
-        "è": "è",
-        "ê": "ê",
-        "à": "à",
-        "ç": "ç",
-        "É": "É",
-        "À": "À",
-        "Ç": "Ç",
-    }
-    s = str(s)
-    for k, v in repl.items():
-        s = s.replace(k, v)
-    return s.encode("latin-1", "replace").decode("latin-1")
-
-
-def _kwh(v) -> str:
-    return f"{float(v):,.0f}".replace(",", " ")
-
-
-def _chf(v) -> str:
-    return f"{float(v):,.0f}".replace(",", " ")
-
-
-def _safe_pct(num, den) -> float:
-    return float(num) / float(den) * 100 if float(den) > 0 else 0.0
-
-
-def _pdf_bytes(pdf: FPDF) -> bytes:
-    out = pdf.output()
-    return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
+def _fmt(value, decimals=0):
+    return f"{value:,.{decimals}f}".replace(",", " ")
 
 
 class ReportPDF(FPDF):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        fonts = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+        self.add_font("DejaVu", fname=str(fonts / "DejaVuSans.ttf"))
+        self.add_font("DejaVu", style="B", fname=str(fonts / "DejaVuSans-Bold.ttf"))
+
     def header(self):
-        pass
+        self.set_fill_color(15, 21, 32)
+        self.rect(0, 0, 210, 24, style="F")
+        self.set_text_color(255, 255, 255)
+        self.set_font("DejaVu", "B", 15)
+        self.set_xy(12, 7)
+        self.cell(150, 9, "SOLEOL | Calculateur de batterie")
+        self.set_y(31)
+        self.set_text_color(35, 35, 35)
 
     def footer(self):
-        self.set_y(-10)
-        self.set_font("Arial", "", FOOTER_SIZE)
-        self.set_text_color(*MUTED)
-        self.cell(0, 5, _tx("SOLEOL - Battery Sizer"), align="L")
-        self.set_y(-10)
-        self.cell(0, 5, _tx(f"Page {self.page_no()} / {{nb}}"), align="R")
+        self.set_y(-11)
+        self.set_font("DejaVu", "", 8)
+        self.set_text_color(*GRAY)
+        self.cell(0, 5, _tx(f"SOLEOL - Simulation énergétique                          Page {self.page_no()} / {{nb}}"))
 
 
-def _add_section_title(pdf: FPDF, title: str, x: float, y: float, w: float):
-    pdf.set_xy(x, y)
-    pdf.set_font("Arial", "B", 12)
-    pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(w, 8, _tx(title), ln=False)
-
-
-def _metric_box(
-    pdf: FPDF,
-    x: float,
-    y: float,
-    w: float,
-    h: float,
-    label: str,
-    value: str,
-    sub: str = "",
-    color=BLUE,
-    label_size: float = CARD_TITLE_SIZE,
-    value_size: float = CARD_VALUE_SIZE,
-    sub_size: float = CARD_SUB_SIZE,
-):
-    pdf.set_draw_color(*BORDER)
-    pdf.set_fill_color(255, 255, 255)
-    pdf.rect(x, y, w, h, style="DF")
-
-    pdf.set_xy(x + 4, y + 4)
-    pdf.set_font("Arial", "B", label_size)
-    pdf.set_text_color(*TEXT)
-    pdf.multi_cell(w - 8, 4, _tx(label.upper()), align="L")
-
-    pdf.set_xy(x + 4, y + 13)
-    pdf.set_font("Arial", "B", value_size)
+def _paragraph(pdf, text, size=9, color=(35, 35, 35), bold=False):
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font("DejaVu", "B" if bold else "", size)
     pdf.set_text_color(*color)
-    pdf.cell(w - 8, 8, _tx(value), ln=True)
-
-    if sub:
-        pdf.set_xy(x + 4, y + h - 9)
-        pdf.set_font("Arial", "", sub_size)
-        pdf.set_text_color(*MUTED)
-        pdf.multi_cell(w - 8, 4, _tx(sub), align="L")
-
-
-
-def _flow_metric_box(
-    pdf: FPDF,
-    x: float,
-    y: float,
-    w: float,
-    h: float,
-    label: str,
-    value: str,
-    sub: str = "",
-    color=BLUE,
-):
-    pdf.set_draw_color(*BORDER)
-    pdf.set_fill_color(255, 255, 255)
-    pdf.rect(x, y, w, h, style="DF")
-
-    # Titre centré
-    pdf.set_xy(x + 3, y + 4)
-    pdf.set_font("Arial", "B", 7.2)
-    pdf.set_text_color(*TEXT)
-    pdf.cell(w - 6, 4, _tx(label.upper()), align="C")
-
-    # Valeur colorée plus petite et parfaitement centrée
-    pdf.set_xy(x + 3, y + 10.5)
-    pdf.set_font("Arial", "B", 12.5)
-    pdf.set_text_color(*color)
-    pdf.cell(w - 6, 8, _tx(value), align="C")
-
-    # Sous-titre centré
-    if sub:
-        pdf.set_xy(x + 3, y + h - 8)
-        pdf.set_font("Arial", "", 7)
-        pdf.set_text_color(*MUTED)
-        pdf.cell(w - 6, 4, _tx(sub), align="C")
-
-def _info_box(pdf: FPDF, x: float, y: float, w: float, h: float, title: str, text: str, fill=LIGHT_ORANGE, border=SOLEOL_ORANGE):
-    pdf.set_draw_color(*border)
-    pdf.set_fill_color(*fill)
-    pdf.rect(x, y, w, h, style="DF")
-    pdf.set_xy(x + 5, y + 4)
-    pdf.set_font("Arial", "B", 8)
-    pdf.set_text_color(*border)
-    pdf.cell(w - 10, 5, _tx(title), ln=True)
-    pdf.set_xy(x + 5, y + 11)
-    pdf.set_font("Arial", "", 9)
-    pdf.set_text_color(*TEXT)
-    pdf.multi_cell(w - 10, 4, _tx(text))
-
-
-def _financial_box(
-    pdf: FPDF,
-    x: float,
-    y: float,
-    w: float,
-    h: float,
-    sim,
-    tariff_import_ht: float,
-    tariff_import_bt: float,
-    tariff_export: float,
-):
-    """Optional financial summary for Residential, PME or C&I studies."""
-    gain_ht = float(getattr(sim, "gain_ht_chf", 0.0) or 0.0)
-    gain_bt = float(getattr(sim, "gain_bt_chf", 0.0) or 0.0)
-    export_lost = float(getattr(sim, "export_value_lost_chf", 0.0) or 0.0)
-    net_gain = float(getattr(sim, "gain_chf", gain_ht + gain_bt - export_lost) or 0.0)
-
-    avoided_ht = float(getattr(sim, "import_avoided_ht", 0.0) or 0.0)
-    avoided_bt = float(getattr(sim, "import_avoided_bt", 0.0) or 0.0)
-    export_stored = float(getattr(sim, "export_stored", 0.0) or 0.0)
-
-    pdf.set_draw_color(*GREEN)
-    pdf.set_fill_color(*LIGHT_GREEN)
-    pdf.rect(x, y, w, h, style="DF")
-
-    pdf.set_xy(x + 5, y + 4)
-    pdf.set_font("Arial", "B", 9)
-    pdf.set_text_color(*GREEN)
-    pdf.cell(w - 10, 5, _tx("ÉCONOMIE FINANCIÈRE"))
-
-    # Partie gauche : détail du calcul.
-    detail_w = 88
-    pdf.set_draw_color(*BORDER)
-    pdf.line(x + detail_w + 4, y + 9, x + detail_w + 4, y + h - 5)
-
-    same_import_tariff = abs(float(tariff_import_ht) - float(tariff_import_bt)) < 1e-9
-    if same_import_tariff:
-        rows = [
-            (
-                "Achat réseau évité",
-                avoided_ht + avoided_bt,
-                float(tariff_import_ht),
-                gain_ht + gain_bt,
-            ),
-            (
-                "Revente non perçue",
-                export_stored,
-                float(tariff_export),
-                -export_lost,
-            ),
-        ]
-        row_y = [y + 13, y + 23]
-    else:
-        rows = [
-            ("Import évité HT", avoided_ht, float(tariff_import_ht), gain_ht),
-            ("Import évité BT", avoided_bt, float(tariff_import_bt), gain_bt),
-            ("Revente non perçue", export_stored, float(tariff_export), -export_lost),
-        ]
-        row_y = [y + 12, y + 20, y + 28]
-
-    for yy, (label, energy, tariff, value) in zip(row_y, rows):
-        pdf.set_xy(x + 5, yy)
-        pdf.set_font("Arial", "B", 6.4)
-        pdf.set_text_color(*TEXT)
-        pdf.cell(31, 4, _tx(label))
-
-        pdf.set_xy(x + 36, yy)
-        pdf.set_font("Arial", "", 6.2)
-        pdf.set_text_color(*MUTED)
-        pdf.cell(27, 4, _tx(f"{_kwh(energy)} kWh x {tariff:.3f}"), align="R")
-
-        pdf.set_xy(x + 65, yy)
-        pdf.set_font("Arial", "B", 6.5)
-        pdf.set_text_color(*(GREEN if value >= 0 else ORANGE))
-        sign = "-" if value < 0 else ""
-        pdf.cell(24, 4, _tx(f"{sign}{_chf(abs(value))} CHF"), align="R")
-
-    # Partie droite : économie nette annuelle mise en évidence.
-    net_x = x + detail_w + 8
-    net_w = w - detail_w - 13
-    pdf.set_xy(net_x, y + 10)
-    pdf.set_font("Arial", "B", 6.8)
-    pdf.set_text_color(*MUTED)
-    pdf.multi_cell(net_w, 3.5, _tx("ÉCONOMIE NETTE\nANNUELLE"), align="C")
-
-    pdf.set_xy(net_x, y + 20)
-    pdf.set_font("Arial", "B", 17)
-    pdf.set_text_color(*GREEN)
-    pdf.cell(net_w, 8, _tx(_chf(net_gain)), align="C")
-
-    pdf.set_xy(net_x, y + 28)
-    pdf.set_font("Arial", "B", 8)
-    pdf.set_text_color(*GREEN)
-    pdf.cell(net_w, 5, "CHF/an", align="C")
-
-
-
-def _draw_arrow(pdf: FPDF, x1: float, y: float, x2: float, color, dashed: bool = False):
-    """Simple horizontal arrow."""
-    pdf.set_draw_color(*color)
-    if dashed:
-        step = 3.0
-        x = x1
-        while x < x2 - 2:
-            pdf.line(x, y, min(x + 1.8, x2 - 2), y)
-            x += step
-    else:
-        pdf.line(x1, y, x2 - 2, y)
-
-    pdf.line(x2 - 5, y - 2, x2 - 2, y)
-    pdf.line(x2 - 5, y + 2, x2 - 2, y)
-
-
-def _draw_sun(pdf: FPDF, cx: float, cy: float, r: float = 3.0):
-    pdf.set_draw_color(*ORANGE)
-    pdf.ellipse(cx - r, cy - r, 2 * r, 2 * r)
-    rays = [
-        (0, -1), (0.7, -0.7), (1, 0), (0.7, 0.7),
-        (0, 1), (-0.7, 0.7), (-1, 0), (-0.7, -0.7),
-    ]
-    for dx, dy in rays:
-        pdf.line(
-            cx + dx * (r + 1.2), cy + dy * (r + 1.2),
-            cx + dx * (r + 3.2), cy + dy * (r + 3.2),
-        )
-
-
-def _draw_panel(pdf: FPDF, x: float, y: float, w: float = 13, h: float = 8):
-    pdf.set_draw_color(*ORANGE)
-    pdf.rect(x, y, w, h)
-    pdf.line(x + w / 3, y, x + w / 3, y + h)
-    pdf.line(x + 2 * w / 3, y, x + 2 * w / 3, y + h)
-    pdf.line(x, y + h / 2, x + w, y + h / 2)
-    pdf.line(x + w / 2, y + h, x + w / 2, y + h + 3)
-    pdf.line(x + w / 2 - 3, y + h + 3, x + w / 2 + 3, y + h + 3)
-
-
-def _draw_house(pdf: FPDF, x: float, y: float, w: float = 13, h: float = 11):
-    pdf.set_draw_color(*TEXT)
-    roof_y = y + 4
-    pdf.line(x, roof_y, x + w / 2, y)
-    pdf.line(x + w / 2, y, x + w, roof_y)
-    pdf.rect(x + 1.5, roof_y, w - 3, h - 4)
-    pdf.rect(x + 4.8, y + 7.2, 3.2, 3.8)
-    pdf.rect(x + 8.9, y + 6.2, 2.1, 2.1)
-
-
-def _draw_battery(pdf: FPDF, x: float, y: float, w: float = 8, h: float = 14):
-    pdf.set_draw_color(*GREEN)
-    pdf.rect(x, y + 1.5, w, h - 1.5)
-    pdf.rect(x + 2.3, y, w - 4.6, 1.5)
-    for i in range(3):
-        yy = y + 4 + i * 3
-        pdf.set_fill_color(*GREEN)
-        pdf.rect(x + 1.5, yy, w - 3, 1.8, style="F")
-
-
-def _draw_grid(pdf: FPDF, x: float, y: float, w: float = 11, h: float = 16):
-    pdf.set_draw_color(76, 60, 170)
-    cx = x + w / 2
-    pdf.line(cx, y, x + 1, y + h)
-    pdf.line(cx, y, x + w - 1, y + h)
-    pdf.line(x + 1, y + h, x + w - 1, y + h)
-    pdf.line(x + 2, y + 5, x + w - 2, y + 5)
-    pdf.line(x + 0.5, y + 9, x + w - 0.5, y + 9)
-    pdf.line(x + 2.2, y + 13, x + w - 2.2, y + 13)
-    pdf.line(x + 2, y + 5, x + w - 2, y + 9)
-    pdf.line(x + w - 2, y + 5, x + 2, y + 9)
-    pdf.line(x + 0.5, y + 9, x + w - 2.2, y + 13)
-    pdf.line(x + w - 0.5, y + 9, x + 2.2, y + 13)
-
-
-def _battery_flow_diagram(pdf: FPDF, x: float, y: float, w: float, h: float):
-    """Vector diagram for the free space on page 1."""
-    pdf.set_draw_color(*BORDER)
-    pdf.set_fill_color(255, 255, 255)
-    pdf.rect(x, y, w, h, style="DF")
-
-    pdf.set_xy(x + 5, y + 4)
-    pdf.set_font("Arial", "B", 9)
-    pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(w - 10, 5, _tx("FONCTIONNEMENT AVEC BATTERIE"))
-
-    pdf.set_xy(x + 5, y + 10)
-    pdf.set_font("Arial", "", 6.6)
-    pdf.set_text_color(*MUTED)
-    pdf.cell(
-        w - 10,
-        4,
-        _tx("Le surplus solaire est stocké pour être utilisé lorsque la production ne suffit plus."),
-    )
-
-    # 5 étapes régulièrement espacées
-    centers = [x + 13, x + 42, x + 71, x + 100, x + 129]
-    icon_y = y + 24
-
-    _draw_sun(pdf, centers[0], icon_y - 4, 2.3)
-    _draw_panel(pdf, centers[0] - 6.5, icon_y, 13, 7.5)
-
-    _draw_house(pdf, centers[1] - 6.5, icon_y - 1, 13, 11)
-
-    _draw_battery(pdf, centers[2] - 4, icon_y - 2, 8, 14)
-
-    _draw_house(pdf, centers[3] - 6.5, icon_y - 1, 13, 11)
-    # Petit croissant / indication soirée
-    pdf.set_draw_color(*GREEN)
-    pdf.ellipse(centers[3] + 5.2, icon_y - 4.5, 3.5, 3.5)
-    pdf.set_fill_color(255, 255, 255)
-    pdf.ellipse(centers[3] + 6.0, icon_y - 5.0, 3.5, 3.5, style="F")
-
-    _draw_grid(pdf, centers[4] - 5.5, icon_y - 3.5, 11, 15)
-
-    # Flèches entre étapes
-    arrow_y = icon_y + 4
-    _draw_arrow(pdf, centers[0] + 8, arrow_y, centers[1] - 8, ORANGE)
-    _draw_arrow(pdf, centers[1] + 8, arrow_y, centers[2] - 7, GREEN)
-    _draw_arrow(pdf, centers[2] + 7, arrow_y, centers[3] - 8, GREEN, dashed=True)
-    _draw_arrow(pdf, centers[3] + 8, arrow_y, centers[4] - 7, (76, 60, 170), dashed=True)
-
-    # Titres des étapes
-    labels = [
-        ("1. Production solaire", ORANGE),
-        ("2. Priorité maison", ORANGE),
-        ("3. Charge batterie", GREEN),
-        ("4. Restitution", GREEN),
-        ("5. Réseau", (76, 60, 170)),
-    ]
-    descriptions = [
-        "Production en journée",
-        "Le solaire alimente le site",
-        "Le surplus est stocké",
-        "La batterie prend le relais",
-        "Appoint ou surplus",
-    ]
-
-    for cx, (label, color), desc in zip(centers, labels, descriptions):
-        pdf.set_xy(cx - 13, y + 42)
-        pdf.set_font("Arial", "B", 5.8)
-        pdf.set_text_color(*color)
-        pdf.multi_cell(26, 3.1, _tx(label), align="C")
-
-        pdf.set_xy(cx - 13, y + 49)
-        pdf.set_font("Arial", "", 5.4)
-        pdf.set_text_color(*TEXT)
-        pdf.multi_cell(26, 3.0, _tx(desc), align="C")
-
-    # Bandeau objectif
-    band_y = y + h - 12
-    pdf.set_draw_color(*BORDER)
-    pdf.set_fill_color(*LIGHT_BG)
-    pdf.rect(x + 5, band_y, w - 10, 8, style="DF")
-
-    pdf.set_xy(x + 8, band_y + 1.3)
-    pdf.set_font("Arial", "B", 6.2)
-    pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(19, 5, _tx("OBJECTIF"))
-
-    pdf.set_draw_color(*BORDER)
-    pdf.line(x + 27, band_y + 1.5, x + 27, band_y + 6.5)
-
-    pdf.set_xy(x + 30, band_y + 1.3)
-    pdf.set_font("Arial", "", 5.8)
-    pdf.set_text_color(*TEXT)
-    pdf.cell(
-        w - 38,
-        5,
-        _tx("Maximiser l'utilisation de votre énergie solaire et réduire les échanges avec le réseau."),
-    )
-
-
-def _resolve_logo_path(logo_path: str | None = None) -> str | None:
-    """Return the first existing Soleol logo path, if available."""
-    from pathlib import Path
-
-    candidates = []
-    if logo_path:
-        candidates.append(Path(logo_path))
-
-    candidates.extend(
-        [
-            Path("logo_soleol.png"),
-            Path("logo_soleol.jpg"),
-            Path("soleol_logo.png"),
-            Path("soleol_logo.jpg"),
-        ]
-    )
-
-    for candidate in candidates:
-        if candidate.is_file():
-            return str(candidate)
-    return None
-
-
-def _side_bar(pdf: FPDF, meta, tariff_profile: str, client_name: str = "", logo_path: str | None = None):
-    pdf.set_fill_color(*DARK)
-    pdf.rect(0, 0, 52, 297, style="F")
-
-    resolved_logo = _resolve_logo_path(logo_path)
-    if resolved_logo:
-        pdf.image(resolved_logo, x=8, y=11, w=36)
-    else:
-        pdf.set_xy(8, 12)
-        pdf.set_font("Arial", "B", 16)
-        pdf.set_text_color(255, 255, 255)
-        pdf.cell(36, 8, "SOLEOL SA", ln=True)
-        pdf.set_x(8)
-        pdf.set_font("Arial", "", 8)
-        pdf.set_text_color(230, 235, 240)
-        pdf.cell(36, 5, "ÉNERGIE SOLAIRE", ln=True)
-
-    pdf.set_draw_color(*SOLEOL_ORANGE)
-    pdf.line(8, 60, 20, 60)
-
-    pdf.set_xy(8, 66)
-    pdf.set_font("Arial", "B", 7)
-    pdf.set_text_color(255, 255, 255)
-    pdf.multi_cell(
-        36,
-        4.5,
-        _tx("ETUDE DE\nDIMENSIONNEMENT\nBATTERIE"),
-    )
-
-    pdf.line(8, 84, 20, 84)
-
-    infos = [
-        ("CLIENT", client_name.strip() or "A renseigner"),
-        ("GRD", tariff_profile),
-        ("PÉRIODE", f"{getattr(meta, 'coverage_days', 0):.0f} jours"),
-    ]
-
-    y = 92
-    for label, val in infos:
-        pdf.set_xy(8, y)
-        pdf.set_font("Arial", "B", SIDEBAR_LABEL_SIZE)
-        pdf.set_text_color(*SOLEOL_ORANGE)
-        pdf.cell(36, 4, _tx(label), ln=True)
-
-        pdf.set_x(8)
-        pdf.set_font("Arial", "", SIDEBAR_VALUE_SIZE)
-        pdf.set_text_color(255, 255, 255)
-        pdf.multi_cell(36, 4, _tx(val))
-        y += 17
-
-    pdf.line(8, 180, 20, 180)
-
-    pdf.set_xy(8, 214)
-    pdf.set_font("Arial", "B", 9)
-    pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.multi_cell(
-        36,
-        4,
-        _tx("L'énergie d'aujourd'hui,\noptimisée\npour demain."),
-        align="L",
-    )
-
-
-def _plot_gain(frontier: pd.DataFrame, best, rec_gain_max: float) -> BytesIO:
-    f = frontier.copy()
-    fig, ax = plt.subplots(figsize=(11.0, 3.6))
-    ax.plot(
-        f.Cap_kWh,
-        f.Import_avoided_kWh,
-        "-o",
-        lw=2.6,
-        color="#1565C0",
-        markerfacecolor="#1565C0",
-        markeredgecolor="#1565C0",
-    )
-    ax.axvline(float(best.Cap_kWh), color="#6b7280", ls="--", lw=1.1)
-    ax.scatter(
-        [float(best.Cap_kWh)],
-        [float(best.Import_avoided_kWh)],
-        s=95,
-        zorder=3,
-        color="#1565C0",
-    )
-    ax.set_title("Énergie achetée évité", fontsize=12, weight="bold")
-    ax.set_xlabel("Capacité batterie (kWh)", fontsize=9, labelpad=8)
-    ax.set_ylabel("Import evité (kWh/an)", fontsize=9)
-    ax.grid(alpha=0.22)
-    ax.tick_params(axis="both", labelsize=8)
-    ax.annotate(
-        f"{best.Cap_kWh:.0f} kWh\n{best.Import_avoided_kWh:.0f} kWh/an",
-        xy=(float(best.Cap_kWh), float(best.Import_avoided_kWh)),
-        xytext=(10, 20),
-        textcoords="offset points",
-        fontsize=8,
-        bbox=dict(boxstyle="round", fc="#fff4ef", ec="#e94e35", alpha=0.95),
-        arrowprops=dict(arrowstyle="->", color="#e94e35"),
-    )
-    fig.tight_layout(pad=1.4)
-    buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=170, bbox_inches="tight", pad_inches=0.16)
+    pdf.multi_cell(0, 4.7 if size <= 10 else 6.5, _tx(text), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(2)
+
+
+def _title(pdf, title):
+    _paragraph(pdf, title, 15, ORANGE, True)
+
+
+def _cards(pdf, cards):
+    gap, width, height = 4., 43.5, 27.
+    x, y = pdf.l_margin, pdf.get_y()
+    for i, (label, value, detail) in enumerate(cards):
+        left = x + i * (width + gap)
+        pdf.set_fill_color(247, 249, 252)
+        pdf.set_draw_color(219, 225, 233)
+        pdf.rect(left, y, width, height, style="DF")
+        pdf.set_xy(left + 3, y + 3)
+        pdf.set_font("DejaVu", "B", 7.5)
+        pdf.set_text_color(*GRAY)
+        pdf.cell(width - 6, 4, _tx(label))
+        pdf.set_xy(left + 3, y + 10)
+        pdf.set_font("DejaVu", "B", 15)
+        pdf.set_text_color(37, 99, 235)
+        pdf.cell(width - 6, 7, _tx(value))
+        pdf.set_xy(left + 3, y + 20)
+        pdf.set_font("DejaVu", "", 7.5)
+        pdf.set_text_color(*GRAY)
+        pdf.cell(width - 6, 4, _tx(detail))
+    pdf.set_xy(x, y + height + 7)
+
+
+def _table(pdf, rows, widths=(65, 121)):
+    pdf.set_font("DejaVu", "", 8.5)
+    pdf.set_text_color(35, 35, 35)
+    with pdf.table(col_widths=widths, first_row_as_headings=False, line_height=5,
+                   padding=2, borders_layout="HORIZONTAL_LINES") as table:
+        for cells in rows:
+            row = table.row()
+            for cell in cells:
+                row.cell(_tx(cell))
+    pdf.ln(4)
+
+
+def monthly_before_after(df, sim):
+    local = pd.to_datetime(df.timestamp, utc=True).dt.tz_convert("Europe/Zurich")
+    frame = pd.DataFrame({"month": local.dt.tz_localize(None).dt.to_period("M"),
+        "Import avant": np.where(sim.valid, df.import_kWh, np.nan), "Import après": sim.import_after,
+        "Export avant": np.where(sim.valid, df.export_kWh, np.nan), "Export après": sim.export_after,
+        "mesure": df.valid.to_numpy(bool), "estime": df.estimated.to_numpy(bool)})
+    flows = frame.groupby("month")[["Import avant", "Import après", "Export avant", "Export après"]].sum(min_count=1)
+    flows["Completeness"] = frame.groupby("month").mesure.mean()
+    flows["Estimated"] = frame.groupby("month").estime.sum()
+    return flows
+
+
+def _plot(section, df, sim, rec, show_financial, capex_chf):
+    fig, ax = plt.subplots(figsize=(9.3, 4.6), constrained_layout=True)
+    f = rec.frontier
+    if section == "frontier":
+        col = "Gain_CHF" if show_financial else "Import_avoided_kWh"
+        unit = "Économie sur la période (CHF)" if show_financial else "Import évité sur la période (kWh)"
+        ax.plot(f.Cap_kWh, f[col], color=BLUE, label="Puissance retenue à chaque capacité")
+        ax.scatter([rec.best.Cap_kWh], [rec.best[col]], color="#e94e35", zorder=3, label="Configuration étudiée")
+        ax.set(xlabel="Capacité nominale (kWh)", ylabel=unit)
+        ax.legend(fontsize=8)
+    elif section == "cycles":
+        annual = sim.annual_factor is not None
+        col = "Cycles_per_year" if annual else "Cycles_period"
+        ax.plot(f.Cap_kWh, f[col], color="#7e3af2")
+        ax.axvline(sim.capacity_kWh, color="#e94e35", linestyle="--")
+        ax.set(xlabel="Capacité nominale (kWh)", ylabel="Cycles DC sur capacité utile" + (" / an (365 jours)" if annual else " / période"))
+    elif section == "soc":
+        local = pd.to_datetime(df.timestamp, utc=True).dt.tz_convert("Europe/Zurich")
+        ax.plot(local, sim.soc_pct, linewidth=.6, color=BLUE)
+        ax.axhline(sim.soc_min_pct, color="#e94e35", linestyle="--", label=f"SOC minimum {sim.soc_min_pct:g} %")
+        ax.set(ylabel="SOC (% de la capacité nominale)", xlabel="Date", ylim=(0, 103))
+        ax.legend(fontsize=8)
+    elif section == "ba":
+        monthly = monthly_before_after(df, sim)
+        x = np.arange(len(monthly))
+        for offset, col, color in ((-.3, "Import avant", "#93b4f2"), (-.1, "Import après", BLUE),
+                                    (.1, "Export avant", "#f9bd94"), (.3, "Export après", "#e94e35")):
+            ax.bar(x + offset, monthly[col], .19, label=col, color=color)
+        ax.set_xticks(x, [str(m) + ("*" if q < 1 else "") for m, q in zip(monthly.index, monthly.Completeness)], rotation=45, ha="right", fontsize=8)
+        ax.set(ylabel="Énergie sur les intervalles simulés (kWh)", xlabel="Année-mois ; * données mesurées incomplètes")
+        ax.legend(fontsize=8)
+    elif section == "payback":
+        pb = simple_payback(capex_chf, sim.gain_annual_chf)
+        years = np.linspace(0, max(10., min(50., (pb or 10.) * 1.15)), 150)
+        ax.plot(years, -capex_chf + years * sim.gain_annual_chf, color=BLUE)
+        ax.axhline(0, color="gray", linewidth=.8)
+        ax.set(xlabel="Années", ylabel="Économies cumulées moins coût installé (CHF)")
+        ax.set_title("Projection simple à profil et tarifs constants", fontsize=11)
+    ax.grid(alpha=.18)
+    stream = BytesIO()
+    fig.savefig(stream, format="png", dpi=150)
     plt.close(fig)
-    buf.seek(0)
-    return buf
+    stream.seek(0)
+    return stream
 
 
-MONTH_LABELS_FR = [
-    "Janvier",
-    "Fevrier",
-    "Mars",
-    "Avril",
-    "Mai",
-    "Juin",
-    "Juillet",
-    "Aout",
-    "Septembre",
-    "Octobre",
-    "Novembre",
-    "Decembre",
-]
-
-
-def _monthly_before_after(df, sim) -> pd.DataFrame:
-    """Monthly import/export table, always ordered from January to December."""
-    data = pd.DataFrame(
-        {
-            "Import avant": df.import_kWh.values,
-            "Import apres": sim.import_after,
-            "Export avant": df.export_kWh.values,
-            "Export apres": sim.export_after,
-        },
-        index=pd.to_datetime(df.timestamp),
-    )
-
-    monthly = data.groupby(data.index.month).sum()
-    monthly = monthly.reindex(range(1, 13), fill_value=0.0)
-    monthly.index = MONTH_LABELS_FR
-    return monthly
-
-
-def _plot_monthly_import(df, sim) -> BytesIO:
-    s = _monthly_before_after(df, sim)
-
-    fig, ax = plt.subplots(figsize=(11.0, 3.0))
-    ax.plot(
-        s.index,
-        s["Import avant"],
-        marker="o",
-        lw=2.5,
-        color="#1565C0",
-        markerfacecolor="#1565C0",
-        markeredgecolor="#1565C0",
-        label="Import avant batterie",
-    )
-    ax.plot(
-        s.index,
-        s["Import apres"],
-        marker="o",
-        lw=2.5,
-        color="#FB8C00",
-        markerfacecolor="#FB8C00",
-        markeredgecolor="#FB8C00",
-        label="Import apres batterie",
-    )
-    ax.set_ylabel("kWh/mois", fontsize=9)
-    ax.set_title("Import réseau mensuel avant / apres batterie", fontsize=11, weight="bold", pad=10)
-    ax.legend(ncol=2, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22), frameon=False)
-    ax.grid(alpha=0.18)
-    ax.tick_params(axis="x", rotation=0, labelsize=8)
-    ax.tick_params(axis="y", labelsize=8)
-    fig.tight_layout(pad=1.4)
-    buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight", pad_inches=0.12)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-def _plot_monthly_export(df, sim) -> BytesIO:
-    s = _monthly_before_after(df, sim)
-
-    fig, ax = plt.subplots(figsize=(11.0, 3.0))
-    ax.plot(
-        s.index,
-        s["Export avant"],
-        marker="o",
-        lw=2.5,
-        color="#2E7D32",
-        markerfacecolor="#2E7D32",
-        markeredgecolor="#2E7D32",
-        label="Export avant batterie",
-    )
-    ax.plot(
-        s.index,
-        s["Export apres"],
-        marker="o",
-        lw=2.5,
-        color="#D32F2F",
-        markerfacecolor="#D32F2F",
-        markeredgecolor="#D32F2F",
-        label="Export apres batterie",
-    )
-    ax.set_ylabel("kWh/mois", fontsize=9)
-    ax.set_title("Export réseau mensuel avant / apres batterie", fontsize=11, weight="bold", pad=10)
-    ax.legend(ncol=2, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22), frameon=False)
-    ax.grid(alpha=0.18)
-    ax.tick_params(axis="x", rotation=0, labelsize=8)
-    ax.tick_params(axis="y", labelsize=8)
-    fig.tight_layout(pad=1.4)
-    buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight", pad_inches=0.12)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-def _page_1(
-    pdf, df, meta, best, big, sim, tariff_profile, gain_share, gain_max_extra,
-    tariff_import_ht, tariff_import_bt, tariff_export, study_mode="residential",
-    show_financial: bool = False,
-    client_name="", logo_path=None,
-):
-    pdf.add_page()
-    _side_bar(pdf, meta, tariff_profile, client_name=client_name, logo_path=logo_path)
-
-    x0 = 58
-    pdf.set_xy(x0, 14)
-    pdf.set_font("Arial", "B", 17)
-    pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(140, 8, _tx("SYNTHESE ÉNERGÉTIQUE"), ln=True)
-
-    import_after = sim.import_after_total
-    export_after = sim.export_after_total
-    import_avoided = sim.import_avoided
-    export_avoided = sim.export_stored
-    import_reduc = _safe_pct(import_avoided, sim.import_before)
-    export_reduc = _safe_pct(export_avoided, sim.export_before)
-
-
-    # Mise en page des indicateurs
-    # Les cartes sont légèrement plus larges et les espacements uniformes.
-    w = 35
-    gap = 2
-    h_top = 31
-    h_small = 27
-
-    # Ligne 1 : caractéristiques principales
-    y_top = 30
-    _metric_box(
-        pdf, x0, y_top, w, h_top,
-        "Capacité\nrecommandée",
-        f"{best.Cap_kWh:.0f} kWh",
-        color=BLUE,
-        label_size=6.8,
-        value_size=14,
-    )
-    _metric_box(
-        pdf, x0 + (w + gap), y_top, w, h_top,
-        "Puissance de charge",
-        f"{best.Power_kW:.0f} kW",
-        color=BLUE,
-        label_size=7.0,
-        value_size=14,
-    )
-    _metric_box(
-        pdf, x0 + 2 * (w + gap), y_top, w, h_top,
-        "Cycles",
-        f"{best.Cycles_per_year:.0f}/an",
-        "équivalents",
-        color=PURPLE,
-        value_size=14,
-    )
-    _metric_box(
-        pdf, x0 + 3 * (w + gap), y_top, w, h_top,
-        "Surplus capté",
-        f"+{sim.surplus_captured:.0%}",
-        "",
-        color=ORANGE,
-        label_size=6,
-        value_size=14,
-    )
-
-    # Ligne 2 : imports et énergie valorisée
-    y_import = 67
-    _flow_metric_box(
-        pdf, x0, y_import, w, h_small,
-        "Import avant",
-        f"{_kwh(sim.import_before)} kWh",
-        "Depuis le réseau",
-        color=BLUE,
-    )
-    _flow_metric_box(
-        pdf, x0 + (w + gap), y_import, w, h_small,
-        "Import après",
-        f"{_kwh(import_after)} kWh",
-        "Depuis le réseau",
-        color=BLUE,
-    )
-    _flow_metric_box(
-        pdf, x0 + 2 * (w + gap), y_import, w, h_small,
-        "Import évité",
-        f"{_kwh(import_avoided)} kWh",
-        f"-{import_reduc:.0f} %",
-        color=GREEN,
-    )
-
-    valorisation_energetique = import_avoided + export_avoided
-    energy_x = x0 + 3 * (w + gap)
-    energy_y = y_import
-    energy_h = 61
-
-    pdf.set_draw_color(*GREEN)
-    pdf.set_fill_color(*LIGHT_GREEN)
-    pdf.rect(energy_x, energy_y, w, energy_h, style="DF")
-
-    pdf.set_xy(energy_x + 4, energy_y + 7)
-    pdf.set_font("Arial", "B", 8)
-    pdf.set_text_color(*GREEN)
-    pdf.multi_cell(w - 8, 4, _tx("ÉNERGIE\nVALORISÉE"), align="C")
-
-    pdf.set_draw_color(*GREEN)
-    pdf.line(energy_x + 5, energy_y + 21, energy_x + w - 5, energy_y + 21)
-
-    # Chiffre principal très visible, unité séparée.
-    pdf.set_xy(energy_x + 3, energy_y + 27)
-    pdf.set_font("Arial", "B", 18)
-    pdf.set_text_color(*GREEN)
-    pdf.cell(w - 6, 9, _tx(_kwh(valorisation_energetique)), align="C")
-
-    pdf.set_xy(energy_x + 3, energy_y + 37)
-    pdf.set_font("Arial", "B", 9)
-    pdf.set_text_color(*GREEN)
-    pdf.cell(w - 6, 6, "kWh", align="C")
-
-    pdf.set_xy(energy_x + 5, energy_y + 47)
-    pdf.set_font("Arial", "", 6.8)
-    pdf.set_text_color(*MUTED)
-    pdf.multi_cell(w - 10, 4, _tx("Import évité\n+\nexport évité"), align="C")
-
-    # Ligne 3 : exports
-    y_export = 101
-    _flow_metric_box(
-        pdf, x0, y_export, w, h_small,
-        "Export avant",
-        f"{_kwh(sim.export_before)} kWh",
-        "Vers le réseau",
-        color=ORANGE,
-    )
-    _flow_metric_box(
-        pdf, x0 + (w + gap), y_export, w, h_small,
-        "Export après",
-        f"{_kwh(export_after)} kWh",
-        "Vers le réseau",
-        color=ORANGE,
-    )
-    _flow_metric_box(
-        pdf, x0 + 2 * (w + gap), y_export, w, h_small,
-        "Export évité",
-        f"{_kwh(export_avoided)} kWh",
-        f"-{export_reduc:.0f} %",
-        color=GREEN,
-    )
-
-    conclusion = (
-        f"Une batterie de {best.Cap_kWh:.0f} kWh permet de valoriser environ "
-        f"{_kwh(valorisation_energetique)} kWh d'énergie solaire par an, en réduisant "
-        f"les achats d'électricité de {_kwh(import_avoided)} kWh et les injections réseau "
-        f"de {_kwh(export_avoided)} kWh."
-    )
-
-    financial_enabled = bool(show_financial)
-
-    if financial_enabled:
-        # Bloc financier optionnel, disponible pour Résidentiel, PME et C&I.
-        _financial_box(
-            pdf, x0, 138, 144, 34, sim,
-            tariff_import_ht=tariff_import_ht,
-            tariff_import_bt=tariff_import_bt,
-            tariff_export=tariff_export,
-        )
-        conclusion_y = 177
-        note_y = 205
-        schema_y = 216
-        schema_x = x0 + 7
-        schema_w = 130
-    else:
-        # Sans bloc financier : rendu historique inchangé.
-        conclusion_y = 138
-        note_y = 170
-        schema_y = 187
-        schema_x = x0
-        schema_w = 144
-
-    _info_box(
-        pdf, x0, conclusion_y, 144, 22, "CONCLUSION", conclusion,
-        fill=(255, 251, 249), border=SOLEOL_ORANGE,
-    )
-
-    pdf.set_xy(x0, note_y)
-    pdf.set_font("Arial", "", 8.2 if financial_enabled else 10)
-    pdf.set_text_color(*MUTED)
-    pdf.multi_cell(
-        145, 4,
-        _tx("Les résultats sont basés sur les mesures réelles import/export et les tarifs renseignés. Les valeurs sont arrondies."),
-    )
-
-
-    # Schéma de fonctionnement sous forme d'image.
-    # Placer le fichier Schema.png (ou Schema.jpg / Schema.jpeg) à côté de report.py.
-    schema_candidates = [
-        "Schema.png",
-        "Schema.jpg",
-        "Schema.jpeg",
-        "schema.png",
-        "schema.jpg",
-        "schema.jpeg",
-    ]
-    schema_path = next((p for p in schema_candidates if Path(p).is_file()), None)
-
-    if schema_path:
-        # En C&I, le schéma est légèrement réduit, sans déformer son ratio, afin de
-        # laisser la place au bloc financier tout en conservant une page 1 de synthèse.
-        pdf.image(schema_path, x=schema_x, y=schema_y, w=schema_w)
-
-
-def _page_2(pdf, df, meta, rec, best, big, sim):
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 15)
-    pdf.set_text_color(*TEXT)
-    pdf.cell(0, 9, _tx("Graphiques principaux"), ln=True)
-
-    gain = _plot_gain(rec.frontier, best, rec.gain_max)
-    monthly_import = _plot_monthly_import(df, sim)
-    monthly_export = _plot_monthly_export(df, sim)
-
-    # Hauteurs forcees pour eviter que le premier graphique ne masque son axe X
-    # et pour garantir trois graphiques lisibles sur une page A4.
-    pdf.image(gain, x=10, y=22, w=188, h=72)
-    pdf.image(monthly_import, x=10, y=101, w=188, h=62)
-    pdf.image(monthly_export, x=10, y=181, w=188, h=62)
-
-    pdf.set_xy(10, 275)
-    pdf.set_font("Arial", "", 7)
-    pdf.set_text_color(*MUTED)
-    pdf.multi_cell(188, 4, _tx("Le graphique principal montre l'énergie achetée au réseau qui peut etre evitée selon la capacité batterie. Les deux courbes mensuelles separent l'effet de la batterie sur l'import et sur l'export réseau."))
-
-
-def _page_3(pdf, df, meta, best, sim, tariff_profile, tariff_import_ht, tariff_import_bt, tariff_export, study_mode="residential"):
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 15)
-    pdf.set_text_color(*SOLEOL_ORANGE)
-    pdf.cell(0, 9, _tx("ANALYSE TECHNIQUE"), ln=True)
-
-    pdf.set_draw_color(*BORDER)
-    pdf.line(10, 20, 198, 20)
-
-    import_after = sim.import_after_total
-    export_after = sim.export_after_total
-    import_avoided = sim.import_avoided
-    export_avoided = sim.export_stored
-    import_reduc = _safe_pct(import_avoided, sim.import_before)
-    export_reduc = _safe_pct(export_avoided, sim.export_before)
-
-    _info_box(
-        pdf, 10, 28, 90, 39,
-        "FLUX RÉSEAU",
-        f"Import avant : {_kwh(sim.import_before)} kWh\n"
-        f"Import après : {_kwh(import_after)} kWh\n"
-        f"Import évité : {_kwh(import_avoided)} kWh (-{import_reduc:.0f}%)\n"
-        f"Export évité : {_kwh(export_avoided)} kWh (-{export_reduc:.0f}%)",
-        fill=LIGHT_BG,
-        border=BLUE,
-    )
-
-    if str(study_mode).lower() in {"ci", "c&i", "industrie", "industrial"}:
-        technical_soc_pct = 5.0
-        boundary_pct = float(getattr(sim, "soc_min_pct", technical_soc_pct) or technical_soc_pct)
-        technical_kwh = float(best.Cap_kWh) * technical_soc_pct / 100.0
-        reserve_kwh = float(best.Cap_kWh) * max(boundary_pct - technical_soc_pct, 0.0) / 100.0
-        battery_text = (
-            f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
-            f"Réserve technique 0-5 % : {technical_kwh:.0f} kWh\n"
-            f"Peak Shaving 5-{boundary_pct:.0f} % : {reserve_kwh:.0f} kWh\n"
-            f"Autoconsommation {boundary_pct:.0f}-100 % : "
-            f"{getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
-        )
-    else:
-        battery_text = (
-            f"Capacité nominale : {best.Cap_kWh:.0f} kWh\n"
-            f"Puissance : {best.Power_kW:.0f} kW\n"
-            f"Cycles équivalents : {best.Cycles_per_year:.0f} cycles/an\n"
-            f"Capacité utile : {getattr(sim, 'usable_capacity_kWh', best.Cap_kWh):.1f} kWh"
-        )
-    if bool(getattr(sim, "peak_shaving_enabled", False)):
-        battery_text += (
-            f"\nRéserve Peak Shaving protégée : "
-            f"{getattr(sim, 'peak_reserve_pct', 0):.0f} %"
-            f"\nGain puissance : calculé séparément"
-        )
-
-    _info_box(
-        pdf, 108, 28, 90, 44 if bool(getattr(sim, "peak_shaving_enabled", False)) else 39,
-        "BATTERIE",
-        battery_text,
-        fill=LIGHT_GREEN,
-        border=GREEN,
-    )
-
-    _info_box(
-        pdf, 10, 76, 188, 26,
-        "HYPOTHÈSES",
-        f"Profil GRD : {tariff_profile} | Pas de temps : {meta.dt_hours * 60:.0f} min | "
-        f"Couverture : {meta.coverage_days:.0f} jours\n"
-        f"Tarifs : HT {tariff_import_ht:.2f}, BT {tariff_import_bt:.2f}, "
-        f"rachat {tariff_export:.2f} CHF/kWh. "
-        + (
-            f"SOC technique : 5 %. Frontière Peak Shaving : {getattr(sim, 'soc_min_pct', 5):.0f} %."
-            if str(study_mode).lower() in {"ci", "c&i", "industrie", "industrial"}
-            else "Plage batterie : 0 % -> 100 %."
-        ),
-        fill=LIGHT_ORANGE,
-        border=SOLEOL_ORANGE,
-    )
-
-    _info_box(
-        pdf, 10, 111, 188, 42,
-        "LECTURE DES RÉSULTATS",
-        f"La batterie réduit les achats réseau de {import_reduc:.0f}% et l'injection de "
-        f"{export_reduc:.0f}%. Elle valorise {_kwh(export_avoided)} kWh/an de surplus solaire "
-        f"avec environ {best.Cycles_per_year:.0f} cycles équivalents par an. "
-        "La capacité retenue correspond au meilleur compromis entre énergie valorisée, "
-        "puissance disponible et utilisation annuelle.",
-        fill=LIGHT_BG,
-        border=BLUE,
-    )
-
-    _info_box(
-        pdf, 10, 162, 188, 38,
-        "POINTS D'ATTENTION",
-        "Les résultats dépendent du profil quart-horaire mesuré, des tarifs d'achat et de reprise, "
-        "du rendement de la batterie et de la capacité utile retenue. Une évolution importante "
-        "de la consommation ou de la production photovoltaïque peut modifier le dimensionnement optimal.",
-        fill=LIGHT_ORANGE,
-        border=SOLEOL_ORANGE,
-    )
-
-
-def generate_battery_report(
-    *,
-    df,
-    meta,
-    rec,
-    best,
-    big,
-    sim,
-    brand,
-    tariff_profile: str,
-    tariff_import_ht: float,
-    tariff_import_bt: float,
-    tariff_export: float,
-    gain_share: float,
-    gain_max_extra: float,
-    study_mode: str = "residential",
-    show_financial: bool = False,
-    cost_life: float = 13,
-    sections=None,
-    swissolar=None,
-    logo_path: str | None = None,
-    client_name: str = "",
-) -> bytes:
-    pdf = ReportPDF(orientation="P", unit="mm", format="A4")
+def generate_battery_report(*, df, meta, rec, sim, assumptions, client_name="", sections=None,
+                            show_financial=False, capex_chf=None, tariff_schedule=None, logo_path=None):
+    sections = list(SECTION_LABELS) if sections is None else list(dict.fromkeys(sections))
+    if any(s not in SECTION_LABELS for s in sections):
+        raise ValueError("Section PDF inconnue.")
+    pdf = ReportPDF(unit="mm", format="A4")
+    pdf.set_margins(12, 31, 12)
+    pdf.set_auto_page_break(True, margin=17)
     pdf.alias_nb_pages()
-    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+    _title(pdf, "Synthèse énergétique")
+    _paragraph(pdf, client_name or "Client non renseigné", 12, bold=True)
+    _paragraph(pdf, f"Du {pd.Timestamp(meta.start).strftime('%d.%m.%Y %H:%M')} au {pd.Timestamp(meta.end).strftime('%d.%m.%Y %H:%M')} (fin exclue) | {meta.coverage_days:.2f} jours", 8.5, GRAY)
+    _cards(pdf, [("CAPACITÉ NOMINALE", f"{sim.capacity_kWh:g} kWh", "Configuration étudiée"),
+                 ("PUISSANCE AC", f"{sim.power_kW:g} kW", "Charge / décharge"),
+                 ("SOC MINIMUM", f"{sim.soc_min_pct:g} %", "Limite choisie"),
+                 ("CAPACITÉ UTILE", f"{sim.usable_capacity_kWh:g} kWh", "Au-dessus du SOC minimum")])
+    _table(pdf, [("Flux sur la période", "Avant batterie", "Après batterie"),
+                 ("Import réseau", f"{_fmt(sim.import_before)} kWh", f"{_fmt(sim.import_after_total)} kWh"),
+                 ("Export réseau", f"{_fmt(sim.export_before)} kWh", f"{_fmt(sim.export_after_total)} kWh")], (66, 60, 60))
+    _paragraph(pdf, f"Surplus capté à l'entrée de la batterie : {_fmt(sim.export_stored)} kWh ({sim.surplus_captured:.1%} du surplus). "
+               f"Énergie restituée au site : {_fmt(sim.import_avoided)} kWh ({sim.import_reduction:.1%} des achats réseau initiaux).", 10, bold=True)
+    _paragraph(pdf, f"Pertes de conversion : {_fmt(sim.conversion_losses_kWh, 1)} kWh. Stock utilisable final : {_fmt(sim.final_stock_kWh, 1)} kWh. Stock non transféré aux interruptions : {_fmt(sim.untransferred_stock_kWh, 1)} kWh.", 9)
+    _paragraph(pdf, f"Cycles équivalents DC sur capacité utile : {sim.cycles_period:.1f} sur la période" +
+               (f" ; {sim.cycles_per_year:.1f}/an sur une base de 365 jours." if sim.annual_factor is not None else ". Annualisation désactivée."), 9)
+    if show_financial:
+        _paragraph(pdf, "Économie financière sur la période", 11, ORANGE, True)
+        _table(pdf, [("Achats HT évités", f"{_fmt(sim.gain_ht_chf, 2)} CHF"),
+                     ("Achats BT évités", f"{_fmt(sim.gain_bt_chf, 2)} CHF"),
+                     ("Revente abandonnée", f"{_fmt(sim.export_value_lost_chf, 2)} CHF"),
+                     ("Économie nette", f"{_fmt(sim.gain_chf, 2)} CHF")])
+        if sim.gain_annual_chf is not None:
+            _paragraph(pdf, f"Équivalent annuel (365 jours) : {_fmt(sim.gain_annual_chf, 2)} CHF/an. Les résultats de période ci-dessus ne sont pas extrapolés.", 8.5)
+    warnings = list(meta.warnings) + recommendation_messages(rec)
+    _paragraph(pdf, "Dimensionnement énergétique indicatif" if rec.recommended else "Configuration d'analyse - dimensionnement non validé", 10, ORANGE, True)
+    for warning in warnings[:3]:
+        _paragraph(pdf, warning, 8.5, GRAY)
+    if len(warnings) > 3:
+        _paragraph(pdf, "Toutes les réserves figurent dans les hypothèses et le contrôle de qualité ci-après.", 8)
+    # Resources are relative to this module, independent of the launch directory.
+    logo = Path(logo_path) if logo_path else ROOT / "logo_soleol.png"
+    if logo.is_file():
+        pdf.image(str(logo), x=174, y=5, w=23, h=13, keep_aspect_ratio=True)
 
-    _page_1(
-        pdf, df, meta, best, big, sim, tariff_profile,
-        gain_share, gain_max_extra,
-        tariff_import_ht, tariff_import_bt, tariff_export,
-        study_mode=study_mode,
-        show_financial=show_financial,
-        client_name=client_name,
-        logo_path=logo_path,
-    )
-    _page_2(pdf, df, meta, rec, best, big, sim)
-    _page_3(
-        pdf, df, meta, best, sim, tariff_profile,
-        tariff_import_ht, tariff_import_bt, tariff_export,
-        study_mode=study_mode,
-    )
-
-    return _pdf_bytes(pdf)
+    pdf.add_page()
+    _title(pdf, "Hypothèses et qualité des données")
+    assumption_rows = list(assumptions.items())
+    if not show_financial:
+        assumption_rows = [(k, v) for k, v in assumption_rows if k not in {"Retour simple", "Coût installé renseigné"}]
+    _table(pdf, assumption_rows)
+    _paragraph(pdf, "Réserves de l'étude", 12, ORANGE, True)
+    for warning in warnings:
+        _paragraph(pdf, "- " + warning, 9)
+    for code, params in rec.notes:
+        _paragraph(pdf, msg("fr", code, params), 9)
+    if meta.missing_periods:
+        _paragraph(pdf, "Périodes inconnues dans la source", 11, ORANGE, True)
+        _table(pdf, [(p["debut"], f"Jusqu'à {p['fin_exclue']} (exclue) ; {p['heures']:g} h") for p in meta.missing_periods])
+    if tariff_schedule:
+        _paragraph(pdf, "Calendrier tarifaire appliqué", 11, ORANGE, True)
+        _table(pdf, [(f"{s['start']} / {s['end']} (exclu)",
+                     f"HT {s['ht']:.4f}, BT {s['bt']:.4f}, reprise {s['export']:.4f} CHF/kWh ; plages {s.get('periods', ())} ; week-end BT : {s.get('weekend_low', False)}") for s in tariff_schedule])
+    schema = next((ROOT / name for name in ("Schema.png", "Schema.jpg", "Schema.jpeg", "schema.png")
+                   if (ROOT / name).is_file()), None)
+    if schema is not None:
+        pdf.add_page()
+        _title(pdf, "Schéma de fonctionnement")
+        pdf.image(str(schema), x=12, y=50, w=186, h=185, keep_aspect_ratio=True)
+    for index, section in enumerate(sections):
+        if index % 2 == 0:
+            pdf.add_page()
+        top = 31 if index % 2 == 0 else 156
+        pdf.set_xy(12, top)
+        _title(pdf, SECTION_LABELS[section])
+        if section == "payback" and (not show_financial or simple_payback(capex_chf, sim.gain_annual_chf) is None):
+            _paragraph(pdf, "Retour simple non calculé : il faut autoriser l'affichage financier, renseigner un coût installé et disposer d'une économie annuelle positive.")
+            continue
+        chart = _plot(section, df, sim, rec, show_financial, capex_chf)
+        pdf.image(chart, x=12, y=top + 10, w=186)
+        pdf.set_y(top + 104)
+        if section == "frontier":
+            _paragraph(pdf, "Point orange : configuration étudiée. La sélection repose sur les achats évités et la revente abandonnée ; aucune rentabilité n'est déduite sans coût installé.", 8.5)
+        elif section == "soc":
+            _paragraph(pdf, "Le stock commence au SOC minimum. Un trou non estimé interrompt la courbe ; le segment suivant repart au SOC minimum. Le stock sous cette limite reste inutilisé.", 8.5)
+        elif section == "ba":
+            _paragraph(pdf, "Années séparées ; * mois de mesures incomplets. Les mois absents restent sans valeur. Les sommes portent sur les intervalles simulés, estimations explicites comprises.", 8.5)
+        elif section == "payback":
+            _paragraph(pdf, f"Coût installé : {_fmt(capex_chf)} CHF. Retour simple : {simple_payback(capex_chf, sim.gain_annual_chf):.1f} ans. Paramètres constants, sans actualisation ni vieillissement.", 8.5)
+        else:
+            _paragraph(pdf, "Cycles = énergie interne déchargée (DC) / capacité utile. Les cycles sur capacité nominale restent une autre convention.", 8.5)
+    return bytes(pdf.output())
