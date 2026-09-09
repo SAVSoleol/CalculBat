@@ -78,13 +78,14 @@ séparateur est décimal. Les valeurs illisibles et infinies restent inconnues.
     return pd.to_numeric(series.map(clean), errors="coerce").replace([np.inf, -np.inf], np.nan)
 
 
-def _parse_datetime(series: pd.Series, dayfirst=True, ambiguous_policy="raise") -> pd.Series:
+def _parse_datetime(series: pd.Series, dayfirst=True, ambiguous_policy="auto") -> pd.Series:
     """Localise les heures suisses ; conserve les offsets déjà fournis.
 
 L'ordre source permet de distinguer les deux occurrences de l'heure d'automne.
-Une occurrence isolée nécessite un choix explicite daylight/standard.
+En mode auto, une occurrence isolée est affectée à l'heure d'été et comptée
+comme hypothèse. Les modes raise/daylight/standard restent disponibles.
 """
-    if ambiguous_policy not in {"raise", "daylight", "standard"}:
+    if ambiguous_policy not in {"auto", "raise", "daylight", "standard"}:
         raise UnsupportedFormatError("Choix d'heure d'automne invalide.")
     s = series.astype(str).str.strip()
     for label, offset in (("CEST", "+02:00"), ("DST", "+02:00"),
@@ -117,8 +118,13 @@ Une occurrence isolée nécessite un choix explicite daylight/standard.
                 if len(positions) == 2:
                     flags[positions] = [True, False]
                 elif len(positions) == 1 and ambiguous_policy != "raise":
-                    flags[positions] = ambiguous_policy == "daylight"
+                    flags[positions] = ambiguous_policy in {"auto", "daylight"}
                     assumed += 1
+                elif len(positions) > 2:
+                    raise UnsupportedFormatError(
+                        "Plus de deux occurrences du même horaire d'automne : "
+                        "vérifier les doublons de l'export."
+                    ) from error
                 else:
                     raise UnsupportedFormatError(
                         "Heure d'automne ambiguë : l'export ne distingue pas les deux occurrences "
@@ -328,13 +334,13 @@ def _finalize(df, vendor, source, data_unit="kWh", default_unit=None, *,
 
 
 def load_meter_file(path, data_unit="auto", *, timestamp_position="end",
-                    ambiguous_policy="raise", interval_minutes=None, aggregate_devices=False):
+                    ambiguous_policy="auto", interval_minutes=None, aggregate_devices=False):
     return load_meter_files([path], data_unit=data_unit, timestamp_position=timestamp_position,
                             ambiguous_policy=ambiguous_policy, interval_minutes=interval_minutes,
                             aggregate_devices=aggregate_devices)
 
 
-def load_meter_files(paths, data_unit="auto", *, timestamp_position="end", ambiguous_policy="raise",
+def load_meter_files(paths, data_unit="auto", *, timestamp_position="end", ambiguous_policy="auto",
                      interval_minutes=None, same_meter=False, aggregate_devices=False):
     paths = [Path(p) for p in paths]
     if not paths:
@@ -349,8 +355,15 @@ def load_meter_files(paths, data_unit="auto", *, timestamp_position="end", ambig
     notes = []
     assumed = sum(r.attrs.get("ambiguous_assumed", 0) for r in raws)
     if assumed:
-        notes.append(f"{assumed} horodatage(s) d'automne ambigu(s) : hypothèse explicite " +
-                     ("première occurrence (été)." if ambiguous_policy == "daylight" else "seconde occurrence (hiver)."))
+        if ambiguous_policy == "auto":
+            notes.append(
+                f"{assumed} horodatage(s) d'automne ambigu(s) : convention automatique, "
+                "première occurrence (été). L'export ne permet pas de confirmer ce choix ; "
+                "les mesures absentes restent inconnues."
+            )
+        else:
+            notes.append(f"{assumed} horodatage(s) d'automne ambigu(s) : hypothèse explicite " +
+                         ("première occurrence (été)." if ambiguous_policy == "daylight" else "seconde occurrence (hiver)."))
     source = "; ".join(p.name for p in paths)
     fingerprint = sha256("|".join(hashes).encode()).hexdigest()
     if "huawei" in vendors:

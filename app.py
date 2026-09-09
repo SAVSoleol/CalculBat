@@ -147,11 +147,14 @@ def main():
     position = st.sidebar.selectbox("L'heure du fichier représente", ["Fin d'intervalle", "Début d'intervalle"],
         key="timestamp_position", help="À vérifier auprès de l'exporteur. Exemple : 00h15 en fin d'intervalle décrit 00h00-00h15. Les index cumulés sont toujours affectés à la fin.")
     with st.sidebar.expander("Horodatages et pas de mesure"):
-        ambiguous_label = st.selectbox("Heure d'automne isolée", ["Signaler l'ambiguïté", "Première occurrence (été)", "Seconde occurrence (hiver)"], key="ambiguous")
+        ambiguous_label = st.selectbox("Heure d'automne isolée",
+            ["Automatique (heure suisse)", "Première occurrence (été)", "Seconde occurrence (hiver)", "Signaler l'ambiguïté"],
+            key="autumn_hour_policy",
+            help="Automatique : conserver les deux occurrences si elles sont fournies. Si une seule est présente sans offset, retenir la première (été) et signaler cette hypothèse à l'écran et dans le PDF.")
         minute_label = st.selectbox("Pas de mesure (minutes)", ["Automatique", "5", "10", "15", "30", "60"], key="interval_minutes")
         aggregate_devices = st.checkbox("Huawei : additionner des compteurs distincts du même site", value=False, key="aggregate_devices",
             help="À activer uniquement si les appareils mesurent des flux distincts à additionner. Ne pas additionner plusieurs appareils qui relisent le même compteur.")
-        st.caption("Les heures avec offset sont conservées. Les heures sans offset sont interprétées en heure suisse. Les deux occurrences correctement renseignées en automne restent distinctes.")
+        st.caption("Les changements d'heure sont traités automatiquement. Les offsets fournis sont conservés ; les deux occurrences d'automne correctement renseignées restent distinctes.")
     st.sidebar.markdown("**Type d'étude et batterie**")
     mode = st.sidebar.radio("Mode", list(MODE_SETTINGS), format_func=lambda m: MODE_SETTINGS[m]["label"], key="study_mode")
     defaults = MODE_SETTINGS[mode]
@@ -205,7 +208,8 @@ def main():
     else:
         active = [uploaded[chosen]]
     files = tuple((f.name, f.getvalue()) for f in active)
-    ambiguous = {"Signaler l'ambiguïté": "raise", "Première occurrence (été)": "daylight", "Seconde occurrence (hiver)": "standard"}[ambiguous_label]
+    ambiguous = {"Automatique (heure suisse)": "auto", "Signaler l'ambiguïté": "raise",
+                 "Première occurrence (été)": "daylight", "Seconde occurrence (hiver)": "standard"}[ambiguous_label]
     try:
         with st.spinner("Lecture et contrôle de la chronologie..."):
             raw, raw_meta = _load_cached(files, "auto" if unit == "Automatique" else unit,
@@ -226,7 +230,11 @@ def main():
             st.dataframe(pd.DataFrame(raw_meta.missing_periods), hide_index=True, width="stretch")
     missing_policy = "block"
     if raw_meta.completeness < 1:
-        treatment = st.radio("Traitement des données manquantes", ["Attendre des données complètes", "Calculer les segments mesurés", "Estimer par jours comparables"], key="missing_policy")
+        with st.expander("Traitement avancé des données manquantes"):
+            treatment = st.radio("Traitement des données manquantes",
+                ["Calculer les segments mesurés", "Estimer par jours comparables", "Attendre des données complètes"],
+                key="gap_treatment")
+            st.caption("Par défaut, le calcul se poursuit sur les segments mesurés. Les trous restent inconnus et chaque reprise commence au SOC minimum.")
         missing_policy = {"Attendre des données complètes": "block", "Calculer les segments mesurés": "segments", "Estimer par jours comparables": "estimate"}[treatment]
     try:
         frame, meta = prepare_simulation_data(raw, raw_meta, missing_policy)
