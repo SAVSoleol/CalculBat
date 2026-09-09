@@ -3,7 +3,7 @@
 Pipeline:  upload meter file(s) -> loaders.normalize -> simulation.grid_search
            -> recommend -> dashboard + PDF.
 
-UI is bilingual (FR default / EN) via i18n.t; recommend.py emits language-neutral
+UI is displayed in French via i18n.t; recommend.py emits language-neutral
 (code, params) messages rendered here with i18n.msg.
 
 See PROJECT_NOTES.md for the full design rationale.
@@ -181,8 +181,8 @@ st.markdown(
 
 
 # --------------------------------------------------------------------------- language
-lang_label = st.sidebar.selectbox("Langue / Language", list(LANGS), index=0, key="lang")
-L = LANGS[lang_label]
+# Interface volontairement fixée en français : aucun choix de langue n'est affiché.
+L = LANGS["Français"]
 
 
 def T(key: str, **fmt) -> str:
@@ -190,9 +190,7 @@ def T(key: str, **fmt) -> str:
 
 
 # --------------------------------------------------------------------------- sidebar
-# Every stateful widget gets a stable key= so its value survives a language switch.
-# (Streamlit keys widgets by label by default; translating labels would otherwise reset
-# them, and drop the uploaded files, on every language change.)
+# Every stateful widget gets a stable key= so its value survives Streamlit reruns.
 st.sidebar.header(T("settings_header"))
 
 client_name = st.sidebar.text_input(
@@ -225,47 +223,6 @@ st.sidebar.caption(
     "kW/W = puissance moyenne convertie en kWh avec le pas de temps détecté. "
     "kWh/Wh = énergie déjà mesurée par intervalle."
 )
-
-# Données complémentaires nécessaires aux repères de dimensionnement Swissolar.
-st.sidebar.markdown("**Installation photovoltaïque**")
-pv_power_kwp = st.sidebar.number_input(
-    "Puissance PV installée (kWc)",
-    min_value=0.0,
-    value=0.0,
-    step=0.1,
-    format="%.1f",
-    key="pv_power_kwp",
-    help="Puissance nominale totale des modules photovoltaïques. Mettre 0 si inconnue.",
-)
-pv_production_kwh = st.sidebar.number_input(
-    "Production PV annuelle (kWh/an)",
-    min_value=0.0,
-    value=0.0,
-    step=100.0,
-    format="%.0f",
-    key="pv_production_kwh",
-    help="Production photovoltaïque annuelle mesurée ou estimée. Mettre 0 si inconnue.",
-)
-auto_total_consumption = st.sidebar.checkbox(
-    "Calculer automatiquement la consommation annuelle",
-    value=True,
-    key="auto_total_consumption",
-    help=(
-        "Consommation totale = import réseau + production PV - export réseau. "
-        "Cette formule suppose qu'il n'y a pas déjà une batterie active sur la période."
-    ),
-)
-manual_total_consumption_kwh = st.sidebar.number_input(
-    "Consommation annuelle totale (kWh/an)",
-    min_value=0.0,
-    value=0.0,
-    step=100.0,
-    format="%.0f",
-    key="manual_total_consumption_kwh",
-    disabled=auto_total_consumption,
-    help="À saisir seulement si le calcul automatique est désactivé.",
-)
-consumption_result_slot = st.sidebar.empty()
 
 st.sidebar.markdown("**Tarifs énergie**")
 
@@ -565,7 +522,7 @@ uploaded = st.file_uploader(
     T("uploader"),
     type=["xlsx", "xls", "csv"],
     accept_multiple_files=True,
-    key="uploader",  # stable key -> files survive a language switch
+    key="uploader",  # stable key -> files survive Streamlit reruns
 )
 
 if not uploaded:
@@ -632,62 +589,17 @@ st.caption(f"Unité appliquée aux données : **{getattr(meta, 'data_unit', 'kWh
 # --------------------------------------------------------------------------- data quality
 imp_tot, exp_tot = float(df.import_kWh.sum()), float(df.export_kWh.sum())
 
-# Reconstitution de la consommation totale du bâtiment. La courbe chargée représente
-# uniquement les échanges avec le réseau, pas la consommation brute du site.
-if auto_total_consumption:
-    if pv_production_kwh > 0:
-        total_consumption_kwh = max(0.0, imp_tot + float(pv_production_kwh) - exp_tot)
-        consumption_result_slot.success(
-            f"Consommation annuelle calculée : {total_consumption_kwh:,.0f} kWh/an".replace(",", " ")
-        )
-    else:
-        total_consumption_kwh = 0.0
-        consumption_result_slot.caption(
-            "Renseigner la production PV annuelle pour calculer la consommation totale."
-        )
-else:
-    total_consumption_kwh = float(manual_total_consumption_kwh)
-    if total_consumption_kwh > 0:
-        consumption_result_slot.info(
-            f"Consommation annuelle utilisée : {total_consumption_kwh:,.0f} kWh/an".replace(",", " ")
-        )
-    else:
-        consumption_result_slot.caption("Consommation annuelle totale non renseignée.")
-
-# Repères empiriques Swissolar (fiche technique PV n°13, dimensionnement résidentiel).
-# Ils servent de contrôle complémentaire ; la simulation quart-horaire reste prioritaire.
+# Objet conservé uniquement pour maintenir la compatibilité avec report.py.
+# Le contrôle Swissolar est désactivé puisque les données PV ne sont plus demandées.
 swissolar = {
     "available": False,
-    "pv_power_kwp": float(pv_power_kwp),
-    "pv_production_kwh": float(pv_production_kwh),
-    "total_consumption_kwh": float(total_consumption_kwh),
+    "pv_power_kwp": 0.0,
+    "pv_production_kwh": 0.0,
+    "total_consumption_kwh": 0.0,
     "production_ref_kwh": None,
     "consumption_ref_kwh": None,
     "overall_ref_kwh": None,
 }
-
-prod_candidates = []
-if pv_power_kwp > 0:
-    # La règle 1-2 heures donne une plage ; 2 h est utilisée comme limite haute pratique.
-    prod_candidates.append(2.0 * float(pv_power_kwp))
-if pv_production_kwh > 0:
-    prod_candidates.append(float(pv_production_kwh) / 1000.0)
-if prod_candidates:
-    swissolar["production_ref_kwh"] = min(prod_candidates)
-
-cons_candidates = []
-if total_consumption_kwh > 0:
-    cons_candidates.append(0.5 * float(total_consumption_kwh) / 365.0)
-    cons_candidates.append(float(total_consumption_kwh) / 1000.0)
-    swissolar["consumption_ref_kwh"] = min(cons_candidates)
-
-refs = [
-    v for v in (swissolar["production_ref_kwh"], swissolar["consumption_ref_kwh"])
-    if v is not None and v > 0
-]
-if refs:
-    swissolar["available"] = True
-    swissolar["overall_ref_kwh"] = min(refs)
 with st.expander(T("dq_expander"), expanded=len(loaded) > 1 or bool(skipped)):
     st.markdown(T("files_loaded_header"))
     for name, (d, m) in loaded.items():
@@ -1074,36 +986,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-if swissolar["available"]:
-    prod_txt = (
-        f"{swissolar['production_ref_kwh']:.1f} kWh"
-        if swissolar["production_ref_kwh"] is not None else "non calculable"
-    )
-    cons_txt = (
-        f"{swissolar['consumption_ref_kwh']:.1f} kWh"
-        if swissolar["consumption_ref_kwh"] is not None else "non calculable"
-    )
-    ref = float(swissolar["overall_ref_kwh"])
-    delta_pct = (float(best.Cap_kWh) / ref - 1.0) * 100.0 if ref > 0 else 0.0
-    if delta_pct <= 20:
-        status = "Cohérence élevée avec les repères Swissolar."
-    elif delta_pct <= 60:
-        status = (
-            "La simulation réelle conduit à une capacité supérieure au repère empirique ; "
-            "cela reste défendable si le profil quart-horaire, l'autonomie recherchée ou "
-            "l'évolution future de la consommation le justifient."
-        )
-    else:
-        status = (
-            "La recommandation simulée est nettement supérieure au repère empirique Swissolar. "
-            "Une justification explicite est recommandée avant l'offre."
-        )
-    st.info(
-        f"**Contrôle Swissolar** — selon la production : {prod_txt} ; "
-        f"selon la consommation : {cons_txt} ; repère conservateur : **{ref:.1f} kWh**. "
-        f"{status}"
-    )
 
 if study_mode in {"residential", "pme"}:
     st.info(
