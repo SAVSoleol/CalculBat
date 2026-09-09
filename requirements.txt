@@ -1,7 +1,7 @@
 # Environnement de validation : Python 3.12. Versions directes testées ensemble.
 streamlit==1.63.0
 numpy==2.3.5
-pandas==2.2.3
+pandas==2.3.3
 openpyxl==3.1.5
 xlrd==2.0.1
 matplotlib==3.10.8
