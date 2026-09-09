@@ -35,11 +35,13 @@ def _ratio(num: float, den: float) -> float:
 
 
 def build_energy_frame(df: pd.DataFrame, sim) -> pd.DataFrame:
-    ts = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Europe/Zurich")
-    dt_hours = sim.dt_hours
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    diffs = ts.sort_values().diff().dropna().dt.total_seconds() / 3600.0
+    dt_hours = float(diffs.median()) if not diffs.empty else 0.25
+    dt_hours = max(dt_hours, 1e-9)
 
-    imp_before = np.where(sim.valid, np.asarray(df["import_kWh"], dtype=float), np.nan)
-    exp_before = np.where(sim.valid, np.asarray(df["export_kWh"], dtype=float), np.nan)
+    imp_before = np.asarray(df["import_kWh"], dtype=float)
+    exp_before = np.asarray(df["export_kWh"], dtype=float)
     imp_after = np.asarray(sim.import_after, dtype=float)
     exp_after = np.asarray(sim.export_after, dtype=float)
     charge = np.maximum(exp_before - exp_after, 0.0)
@@ -60,10 +62,6 @@ def build_energy_frame(df: pd.DataFrame, sim) -> pd.DataFrame:
             "battery_charge_kWh": charge,
             "battery_discharge_kWh": discharge,
             "soc_pct": np.clip(soc_pct, 0.0, 100.0),
-            "stock_change_kWh": sim.soc - sim.soc_start,
-            "conversion_losses_kWh": charge * (1 - np.sqrt(sim.roundtrip_eff)) + discharge * (1 / np.sqrt(sim.roundtrip_eff) - 1),
-            "measured": df["valid"].to_numpy(bool),
-            "estimated": df["estimated"].to_numpy(bool),
         }
     ).dropna(subset=["timestamp"])
 
@@ -96,8 +94,7 @@ def _controls(frame: pd.DataFrame) -> tuple[str, pd.DataFrame, bool, str]:
             return mode, selected, True, "Heure"
 
         if mode == "Semaine":
-            local_naive = frame["timestamp"].dt.tz_localize(None)
-            mondays = local_naive.dt.normalize() - pd.to_timedelta(local_naive.dt.weekday, unit="D")
+            mondays = frame["timestamp"].dt.normalize() - pd.to_timedelta(frame["timestamp"].dt.weekday, unit="D")
             weeks = sorted(mondays.dt.date.unique().tolist())
             chosen = st.selectbox(
                 "Semaine affichée",
@@ -111,14 +108,13 @@ def _controls(frame: pd.DataFrame) -> tuple[str, pd.DataFrame, bool, str]:
             return mode, selected, True, "Jour / heure"
 
         if mode == "Mois":
-            months = frame["timestamp"].dt.tz_localize(None).dt.to_period("M")
-            periods = sorted(months.unique().tolist())
+            periods = sorted(frame["timestamp"].dt.to_period("M").unique().tolist())
             labels = [p.strftime("%m.%Y") for p in periods]
             label = st.selectbox("Mois affiché", labels, index=len(labels) - 1, key="energy_month")
             period = periods[labels.index(label)]
-            raw = frame[months == period].copy()
+            raw = frame[frame["timestamp"].dt.to_period("M") == period].copy()
             energy_cols = [c for c in frame.columns if c.endswith("_kWh")]
-            selected = raw.set_index("timestamp")[energy_cols].resample("D").sum(min_count=1).reset_index()
+            selected = raw.set_index("timestamp")[energy_cols].resample("D").sum().reset_index()
             selected["soc_pct"] = raw.set_index("timestamp")["soc_pct"].resample("D").last().values
             return mode, selected, False, "Jour du mois"
 
@@ -126,7 +122,7 @@ def _controls(frame: pd.DataFrame) -> tuple[str, pd.DataFrame, bool, str]:
         year = st.selectbox("Année affichée", years, index=len(years) - 1, key="energy_year")
         raw = frame[frame["timestamp"].dt.year == int(year)].copy()
         energy_cols = [c for c in frame.columns if c.endswith("_kWh")]
-        selected = raw.set_index("timestamp")[energy_cols].resample("MS").sum(min_count=1).reset_index()
+        selected = raw.set_index("timestamp")[energy_cols].resample("MS").sum().reset_index()
         selected["soc_pct"] = raw.set_index("timestamp")["soc_pct"].resample("MS").last().values
         return mode, selected, False, "Mois"
 
@@ -142,8 +138,6 @@ def _totals(selected: pd.DataFrame) -> dict[str, float]:
         "exp_after": total("export_after_kWh"),
         "charge": total("battery_charge_kWh"),
         "discharge": total("battery_discharge_kWh"),
-        "stock_change": total("stock_change_kWh"),
-        "losses": total("conversion_losses_kWh"),
     }
 
 
@@ -212,8 +206,8 @@ def _chart(selected: pd.DataFrame, mode: str, use_power: bool, x_title: str) -> 
 
 
 def _flow_diagram(t: dict[str, float], soc: float, best) -> None:
-    net_batt = t["stock_change"]
-    batt_action = "augmenté" if net_batt >= 0 else "diminué"
+    net_batt = t["charge"] - t["discharge"]
+    batt_action = "chargée" if net_batt >= 0 else "déchargée"
     st.markdown(
         f"""
         <div class="em-flow-shell">
@@ -225,7 +219,7 @@ def _flow_diagram(t: dict[str, float], soc: float, best) -> None:
           <div class="em-flow-arrow">↔</div>
           <div class="em-flow-node"><span class="em-flow-icon">⚡</span><b>Réseau</b><strong class="orange">{_fmt(t['imp_after'])} kWh importés</strong><small>{_fmt(t['exp_after'])} kWh injectés</small></div>
         </div>
-        <div class="em-flow-caption">Sur les intervalles simulés, le stock interne a {batt_action} de {_fmt(abs(net_batt))} kWh. Pertes de conversion : {_fmt(t['losses'])} kWh.</div>
+        <div class="em-flow-caption">Sur la période sélectionnée, la batterie a été globalement {batt_action} de {_fmt(abs(net_batt))} kWh.</div>
         """,
         unsafe_allow_html=True,
     )
@@ -240,7 +234,7 @@ def _statistics(t: dict[str, float]) -> None:
         f"""
         <div class="em-kpi-grid">
           <div class="em-kpi"><span>Surplus solaire</span><strong class="green">{_fmt(t['exp_before'])} kWh</strong><small>Avant batterie</small></div>
-          <div class="em-kpi"><span>Surplus capté (entrée AC)</span><strong class="blue">{_fmt(t['charge'])} kWh</strong><small>{captured:.0%} du surplus</small></div>
+          <div class="em-kpi"><span>Énergie stockée</span><strong class="blue">{_fmt(t['charge'])} kWh</strong><small>{captured:.0%} du surplus</small></div>
           <div class="em-kpi"><span>Énergie restituée</span><strong class="purple">{_fmt(t['discharge'])} kWh</strong><small>{covered:.0%} des besoins réseau initiaux</small></div>
           <div class="em-kpi"><span>Import après batterie</span><strong class="orange">{_fmt(t['imp_after'])} kWh</strong><small>-{import_reduction:.0%} par rapport à avant</small></div>
           <div class="em-kpi"><span>Injection après batterie</span><strong class="cyan">{_fmt(t['exp_after'])} kWh</strong><small>-{export_reduction:.0%} par rapport à avant</small></div>
@@ -287,7 +281,7 @@ def render_energy_dashboard(df: pd.DataFrame, sim, best) -> None:
         return
 
     st.markdown('<div class="em-chart-shell">', unsafe_allow_html=True)
-    st.plotly_chart(_chart(selected, mode, use_power, x_title), width="stretch", config={"displaylogo": False})
+    st.plotly_chart(_chart(selected, mode, use_power, x_title), use_container_width=True, config={"displaylogo": False})
     st.markdown("</div>", unsafe_allow_html=True)
 
     t = _totals(selected)
@@ -295,8 +289,6 @@ def render_energy_dashboard(df: pd.DataFrame, sim, best) -> None:
     _flow_diagram(t, soc, best)
     _statistics(t)
     st.caption(
-        "Les trous restent vides dans les courbes ; les agrégats portent sur les intervalles simulés. "
-        "Les périodes estimées sont identifiées dans le contrôle de qualité. "
         "Les courbes sont calculées à partir des mesures d'import/export et de la simulation. "
         "Les séries 'besoin réseau avant batterie' et 'injection réseau' peuvent être activées dans la légende. "
         "Une courbe complète production PV / consommation totale nécessitera un profil PV quart-horaire."

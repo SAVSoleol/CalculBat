@@ -23,7 +23,7 @@ GRD_PROFILES = {
         "export": 0.08,
         "periods": (),
         "weekend_low": False,
-        "needs_verification": True,
+        "needs_verification": False,
         "single_tariff": True,
         "source": "Tarif unique saisi manuellement",
         "description": (
@@ -37,8 +37,8 @@ GRD_PROFILES = {
         "export": 0.0600,
         "periods": ((7.0, 12.0), (17.0, 23.0)),
         "weekend_low": False,
-        "needs_verification": True,
-        "source": "Horaires Groupe E 2026 ; montants hérités du simulateur, à vérifier sur le contrat client",
+        "needs_verification": False,
+        "source": "Groupe E 2026 - PLUS tarif double, selon facture client",
         "description": (
             "Tarifs variables 2026 utilisés par défaut. "
             "HT : 07h-12h et 17h-23h à 0.2932 CHF/kWh. "
@@ -53,7 +53,7 @@ GRD_PROFILES = {
         "export": 0.08,
         "periods": ((17.0, 22.0),),
         "weekend_low": True,
-        "needs_verification": True,
+        "needs_verification": False,
         "source": "Profil heures pleines / heures creuses Romande Energie",
         "description": (
             "Heures pleines : lundi-vendredi de 17h00 à 22h00. "
@@ -186,42 +186,3 @@ GRD_PROFILES = {
         "description": "Définir manuellement les plages haut tarif.",
     },
 }
-
-
-def get_profile(name: str, year: int) -> dict:
-    """Copie d'un préremplissage ; les prix ne valent jamais validation de contrat."""
-    if name not in GRD_PROFILES:
-        raise ValueError("Profil tarifaire inconnu.")
-    profile = dict(GRD_PROFILES[name])
-    profile["reference_year"] = int(year)
-    profile["needs_verification"] = True
-    profile["price_note"] = "Prix indicatifs hérités : vérifier achat, reprise, taxes variables et produit du client."
-    if name == "Groupe E":
-        if year == 2025:
-            profile["periods"] = ((7., 21.),)
-        elif year == 2026:
-            profile["periods"] = ((7., 12.), (17., 23.))
-        else:
-            profile["source"] = "Horaires non vérifiés pour cette année ; renseigner le contrat."
-        profile["schedule_source"] = "https://www.groupe-e.ch/fr/decouvrir-groupe-e/medias/communiques-de-presse/tarifs-en-baisse"
-        profile["description"] = "Plages HT proposées : " + "; ".join(f"{a:g}h-{b:g}h" for a, b in profile["periods"]) + ". Prix à vérifier."
-    elif name == "Romande Energie" and year in {2025, 2026}:
-        profile["schedule_source"] = "https://www.romande-energie.ch/espace-presse/communiques-de-presse/des-changements-en-2025-romande-energie-propose-des-tarifs-la"
-    return profile
-
-
-def parse_periods(value: str) -> tuple:
-    """Exemple : '7-12;17-23'. Un champ vide signifie aucune plage HT."""
-    import math
-    if not str(value).strip():
-        return ()
-    result = []
-    try:
-        for part in str(value).replace(",", ".").split(";"):
-            start, end = (float(x.strip()) for x in part.split("-"))
-            if not all(math.isfinite(x) and 0 <= x <= 24 for x in (start, end)) or start == end:
-                raise ValueError
-            result.append((start, end))
-    except (TypeError, ValueError) as error:
-        raise ValueError("Plages HT attendues au format 7-12;17-23, heures entre 0 et 24.") from error
-    return tuple(result)
