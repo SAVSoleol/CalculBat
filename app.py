@@ -210,6 +210,8 @@ def _tariff_settings():
                                        value=2026, step=1, key="tariff_year"))
     profile = get_profile(name, year)
     token = f"{name}_{year}"
+    if profile.get("revision"):
+        token += f"_{profile['revision']}"
     st.sidebar.caption(profile["price_note"])
     if profile.get("seasonal"):
         seasonal_prices = {}
@@ -220,10 +222,9 @@ def _tariff_settings():
             seasonal_prices[field] = float(cents) / 100
         export = st.sidebar.number_input("Tarif reprise (CHF/kWh)", value=float(profile["export"]),
             step=.001, format="%.4f", key=f"export_{token}")
-        st.sidebar.caption("Le tarif de reprise n'a pas été fourni pour Spécial : la valeur de départ de 0.0600 CHF/kWh est à adapter au contrat.")
+        st.sidebar.caption(profile["export_note"])
         with st.sidebar.expander("Horaires et référence tarifaire"):
             st.caption(profile["description"])
-            st.caption("HP à partir de 07h00, HC à partir de 23h00, en heure suisse. Aucun régime distinct pour les jours fériés.")
             st.caption(profile["source"])
             note = st.text_input("Référence du contrat / produit", value="", key=f"contract_{token}")
         return dict(name=name, year=year, ht=seasonal_prices["winter_ht"], bt=seasonal_prices["winter_bt"],
@@ -256,15 +257,23 @@ def _calendar(meta, tariffs):
             **tariffs["seasonal_prices"], tariff_export=tariffs["export"])
         note = (f"Profil Spécial du scénario {tariffs['year']} : été du 1er avril au 30 septembre, "
                 "hiver du 1er octobre au 31 mars, appliqués automatiquement aux dates réelles de la courbe, en heure suisse. "
-                "HP du lundi au samedi de 07h00 à 23h00 ; HC le reste du temps. "
+                "HP du lundi au vendredi de 07h00 à 23h00 et le samedi de 07h00 à 13h30 ; HC le reste du temps. "
                 "Ce scénario ne reconstitue pas les factures historiques.")
         st.caption(note)
         st.caption("Les tarifs HT/BT du détail des gains et du rapport sont des moyennes pondérées par l'énergie réellement évitée dans chaque saison (HT = HP, BT = HC).")
+        price_periods = []
+        for entry in schedule:
+            if (price_periods and price_periods[-1]["end"] == entry["start"]
+                    and all(price_periods[-1][key] == entry[key]
+                            for key in ("season", "ht", "bt", "export"))):
+                price_periods[-1]["end"] = entry["end"]
+            else:
+                price_periods.append(dict(entry))
         st.dataframe(pd.DataFrame([{
             "Début": entry["start"], "Fin exclue": entry["end"], "Saison": entry["season"],
             "HP (ct/kWh)": round(entry["ht"] * 100, 2), "HC (ct/kWh)": round(entry["bt"] * 100, 2),
             "Reprise (CHF/kWh)": entry["export"],
-        } for entry in schedule]), hide_index=True, width="stretch")
+        } for entry in price_periods]), hide_index=True, width="stretch")
         return schedule, note
     mode = st.selectbox("Application des tarifs", ["Scénario tarifaire unique", "Calendrier par période"], key="tariff_application")
     if mode == "Scénario tarifaire unique":
