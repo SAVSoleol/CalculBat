@@ -33,10 +33,10 @@ def recommendation_messages(rec):
 
 def study_assumptions(sim, meta, rec, *, tariff_profile, tariff_year, tariff_note,
                       tariff_import_ht, tariff_import_bt, tariff_export, periods,
-                      weekend_low, tariff_schedule=None, capex_chf=None):
+                      weekend_low, tariff_schedule=None, capex_chf=None, seasonal_prices=None):
     """Même objet présenté à l'écran et transmis au PDF ; valeurs issues du moteur."""
     from simulation import simple_payback
-    return {
+    assumptions = {
         "Période analysée": f"{meta.start} au {meta.end} (fin exclue)",
         "Source": meta.source,
         "Pas de temps": f"{sim.dt_hours * 60:g} minutes",
@@ -65,3 +65,13 @@ def study_assumptions(sim, meta, rec, *, tariff_profile, tariff_year, tariff_not
         "Retour simple": f"{simple_payback(capex_chf, sim.gain_annual_chf):.1f} ans, hors actualisation" if simple_payback(capex_chf, sim.gain_annual_chf) is not None else "Non calculable",
         "Périmètre": "Pas de vieillissement ni de pertes auxiliaires ajoutées. Aucun gain de Peak Shaving ou d'arbitrage réseau.",
     }
+    if seasonal_prices:
+        assumptions["Tarifs CHF/kWh"] = (
+            f"Été HP {seasonal_prices['summer_ht']:.4f} / HC {seasonal_prices['summer_bt']:.4f} ; "
+            f"hiver HP {seasonal_prices['winter_ht']:.4f} / HC {seasonal_prices['winter_bt']:.4f} ; "
+            f"reprise {tariff_export:.4f}"
+        )
+        assumptions["Week-end"] = "Samedi : HP 07h-23h, HC autrement ; dimanche entièrement HC"
+        assumptions["Saisons tarifaires"] = "Été : 1er avril au 30 septembre ; hiver : 1er octobre au 31 mars"
+        assumptions["Lecture HT/BT"] = "HT = HP, BT = HC ; tarifs du détail des gains pondérés par les kWh évités dans chaque saison"
+    return assumptions

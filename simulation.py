@@ -36,13 +36,26 @@ def _periods(periods):
     return result
 
 
-def _high_mask(local, periods, weekend_low):
+def _weekdays(value):
+    if value is None:
+        return None
+    if not isinstance(value, (tuple, list)) or any(
+        isinstance(day, (bool, np.bool_)) or not isinstance(day, (int, np.integer)) or not 0 <= day <= 6
+        for day in value
+    ):
+        raise ValueError("Jours HT invalides : liste d'entiers de 0 (lundi) à 6 (dimanche).")
+    return tuple(sorted(set(value)))
+
+
+def _high_mask(local, periods, weekend_low, high_tariff_weekdays=None):
     hour = local.hour + local.minute / 60 + local.second / 3600
     mask = np.zeros(len(local), dtype=bool)
     for start, end in periods:
         mask |= ((hour >= start) & (hour < end)) if start < end else ((hour >= start) | (hour < end))
     if weekend_low:
         mask &= local.weekday < 5
+    if high_tariff_weekdays is not None:
+        mask &= np.isin(local.weekday, high_tariff_weekdays)
     return mask
 
 
@@ -81,7 +94,8 @@ Un calendrier optionnel couvre chaque date avec start inclus / end exclu.
             raise ValueError("Les limites du calendrier tarifaire doivent être alignées à la minute.")
         schedule.append((start, end, _finite(entry["ht"], "HT calendrier"),
                          _finite(entry["bt"], "BT calendrier"), _finite(entry["export"], "Reprise calendrier"),
-                         _periods(entry.get("periods", periods)), bool(entry.get("weekend_low", weekend_low_tariff))))
+                         _periods(entry.get("periods", periods)), bool(entry.get("weekend_low", weekend_low_tariff)),
+                         _weekdays(entry.get("high_tariff_weekdays"))))
     buy = np.zeros(n)
     buy_ht = np.zeros(n)
     high_fraction = np.zeros(n)
@@ -96,9 +110,9 @@ Un calendrier optionnel couvre chaque date avec start inclus / end exclu.
             export += sell
         else:
             covered = np.zeros(n, dtype=int)
-            for start, end, h, b, e, windows, weekend in schedule:
+            for start, end, h, b, e, windows, weekend, weekdays in schedule:
                 selected = (local >= start) & (local < end)
-                mask = _high_mask(local, windows, weekend)
+                mask = _high_mask(local, windows, weekend, weekdays)
                 covered += selected
                 buy += np.where(selected, np.where(mask, h, b), 0.)
                 buy_ht += (selected & mask) * h

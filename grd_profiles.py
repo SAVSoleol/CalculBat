@@ -47,6 +47,25 @@ GRD_PROFILES = {
             "Les coûts fixes ne sont pas inclus dans le gain batterie."
         ),
     },
+    "Spécial": {
+        "seasonal": True,
+        "ht": 0.1076,
+        "bt": 0.0814,
+        "summer_ht": 0.0821,
+        "summer_bt": 0.0601,
+        "winter_ht": 0.1076,
+        "winter_bt": 0.0814,
+        "export": 0.0600,
+        "periods": ((7.0, 23.0),),
+        "weekend_low": False,
+        "high_tariff_weekdays": (0, 1, 2, 3, 4, 5),
+        "needs_verification": False,
+        "source": "Tarifs d'achat et horaires fournis par l'utilisateur ; reprise à renseigner séparément.",
+        "description": (
+            "Été du 1er avril au 30 septembre ; hiver du 1er octobre au 31 mars. "
+            "HP du lundi au samedi de 07h00 à 23h00 ; HC le reste du temps, dimanche compris."
+        ),
+    },
     "Romande Energie": {
         "ht": 0.31,
         "bt": 0.21,
@@ -207,7 +226,49 @@ def get_profile(name: str, year: int) -> dict:
         profile["description"] = "Plages HT proposées : " + "; ".join(f"{a:g}h-{b:g}h" for a, b in profile["periods"]) + ". Prix à vérifier."
     elif name == "Romande Energie" and year in {2025, 2026}:
         profile["schedule_source"] = "https://www.romande-energie.ch/espace-presse/communiques-de-presse/des-changements-en-2025-romande-energie-propose-des-tarifs-la"
+    elif name == "Spécial":
+        profile["needs_verification"] = False
+        profile["price_note"] = "Tarifs d'achat fournis : quatre prix saisonniers, modifiables ci-dessous."
     return profile
+
+
+def special_tariff_schedule(start, end, *, summer_ht, summer_bt, winter_ht, winter_bt,
+                            tariff_export):
+    """Calendrier Spécial sur les dates réelles, en heure suisse, fin exclue.
+
+    Les saisons tarifaires changent à minuit le 1er avril et le 1er octobre,
+    indépendamment des dates de changement d'heure. Tous les prix sont en CHF/kWh.
+    """
+    import math
+    import pandas as pd
+
+    def local(value):
+        timestamp = pd.Timestamp(value)
+        if pd.isna(timestamp):
+            raise ValueError("Date du calendrier Spécial invalide.")
+        return (timestamp.tz_localize("Europe/Zurich") if timestamp.tzinfo is None
+                else timestamp.tz_convert("Europe/Zurich"))
+
+    start, end = local(start), local(end)
+    if end <= start:
+        raise ValueError("La fin du calendrier Spécial doit suivre son début.")
+    summer_ht, summer_bt, winter_ht, winter_bt, tariff_export = map(
+        float, (summer_ht, summer_bt, winter_ht, winter_bt, tariff_export))
+    if not all(math.isfinite(p) for p in (summer_ht, summer_bt, winter_ht, winter_bt, tariff_export)):
+        raise ValueError("Prix du calendrier Spécial invalide.")
+    profile = GRD_PROFILES["Spécial"]
+    schedule = []
+    for year in range(start.year, (end - pd.Timedelta(nanoseconds=1)).year + 1):
+        for a, b, season, ht, bt in (
+            (f"{year}-01-01", f"{year}-04-01", "hiver", winter_ht, winter_bt),
+            (f"{year}-04-01", f"{year}-10-01", "été", summer_ht, summer_bt),
+            (f"{year}-10-01", f"{year+1}-01-01", "hiver", winter_ht, winter_bt),
+        ):
+            if local(a) < end and local(b) > start:
+                schedule.append(dict(start=a, end=b, season=season, ht=ht, bt=bt,
+                    export=tariff_export, periods=profile["periods"], weekend_low=False,
+                    high_tariff_weekdays=profile["high_tariff_weekdays"]))
+    return schedule
 
 
 def parse_periods(value: str) -> tuple:

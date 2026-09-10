@@ -19,7 +19,7 @@ import streamlit as st
 from loaders import load_meter_files, prepare_simulation_data, UnsupportedFormatError
 from simulation import grid_search, simulate, simple_payback, HAS_NUMBA
 from recommend import MODE_SETTINGS, fixed_grid, recommend
-from grd_profiles import GRD_PROFILES, get_profile, parse_periods
+from grd_profiles import GRD_PROFILES, get_profile, parse_periods, special_tariff_schedule
 from i18n import t, msg, recommendation_messages, study_assumptions
 from energy_dashboard import render_energy_dashboard
 from report import generate_battery_report, SECTION_LABELS, monthly_before_after
@@ -211,6 +211,24 @@ def _tariff_settings():
     profile = get_profile(name, year)
     token = f"{name}_{year}"
     st.sidebar.caption(profile["price_note"])
+    if profile.get("seasonal"):
+        seasonal_prices = {}
+        for field, label in (("summer_ht", "HP été"), ("summer_bt", "HC été"),
+                             ("winter_ht", "HP hiver"), ("winter_bt", "HC hiver")):
+            cents = st.sidebar.number_input(f"{label} (ct/kWh)",
+                value=round(profile[field] * 100, 2), step=.01, format="%.2f", key=f"{field}_{token}")
+            seasonal_prices[field] = float(cents) / 100
+        export = st.sidebar.number_input("Tarif reprise (CHF/kWh)", value=float(profile["export"]),
+            step=.001, format="%.4f", key=f"export_{token}")
+        st.sidebar.caption("Le tarif de reprise n'a pas été fourni pour Spécial : la valeur de départ de 0.0600 CHF/kWh est à adapter au contrat.")
+        with st.sidebar.expander("Horaires et référence tarifaire"):
+            st.caption(profile["description"])
+            st.caption("HP à partir de 07h00, HC à partir de 23h00, en heure suisse. Aucun régime distinct pour les jours fériés.")
+            st.caption(profile["source"])
+            note = st.text_input("Référence du contrat / produit", value="", key=f"contract_{token}")
+        return dict(name=name, year=year, ht=seasonal_prices["winter_ht"], bt=seasonal_prices["winter_bt"],
+                    export=float(export), periods=profile["periods"], weekend=False, note=note,
+                    seasonal_prices=seasonal_prices)
     unique = st.sidebar.checkbox("Tarif achat unique 24h/24", value=bool(profile.get("single_tariff", False)),
                                   key=f"unique_{token}")
     ht = st.sidebar.number_input("Tarif achat " + ("unique" if unique else "HT") + " (CHF/kWh)",
@@ -233,6 +251,21 @@ def _tariff_settings():
 
 
 def _calendar(meta, tariffs):
+    if tariffs.get("seasonal_prices"):
+        schedule = special_tariff_schedule(meta.start, meta.end,
+            **tariffs["seasonal_prices"], tariff_export=tariffs["export"])
+        note = (f"Profil Spécial du scénario {tariffs['year']} : été du 1er avril au 30 septembre, "
+                "hiver du 1er octobre au 31 mars, appliqués automatiquement aux dates réelles de la courbe, en heure suisse. "
+                "HP du lundi au samedi de 07h00 à 23h00 ; HC le reste du temps. "
+                "Ce scénario ne reconstitue pas les factures historiques.")
+        st.caption(note)
+        st.caption("Les tarifs HT/BT du détail des gains et du rapport sont des moyennes pondérées par l'énergie réellement évitée dans chaque saison (HT = HP, BT = HC).")
+        st.dataframe(pd.DataFrame([{
+            "Début": entry["start"], "Fin exclue": entry["end"], "Saison": entry["season"],
+            "HP (ct/kWh)": round(entry["ht"] * 100, 2), "HC (ct/kWh)": round(entry["bt"] * 100, 2),
+            "Reprise (CHF/kWh)": entry["export"],
+        } for entry in schedule]), hide_index=True, width="stretch")
+        return schedule, note
     mode = st.selectbox("Application des tarifs", ["Scénario tarifaire unique", "Calendrier par période"], key="tariff_application")
     if mode == "Scénario tarifaire unique":
         note = (f"Tarifs du scénario {tariffs['year']} appliqués à tous les intervalles mesurés, "
@@ -985,7 +1018,8 @@ def main():
     assumptions = study_assumptions(sim, meta, rec, tariff_profile=tariffs["name"], tariff_year=tariffs["year"],
         tariff_note=tariff_note + (" Référence : " + tariffs["note"] if tariffs["note"] else " Contrat non référencé."),
         tariff_import_ht=tariffs["ht"], tariff_import_bt=tariffs["bt"], tariff_export=tariffs["export"],
-        periods=tariffs["periods"], weekend_low=tariffs["weekend"], tariff_schedule=schedule, capex_chf=capex)
+        periods=tariffs["periods"], weekend_low=tariffs["weekend"], tariff_schedule=schedule, capex_chf=capex,
+        seasonal_prices=tariffs.get("seasonal_prices"))
     with st.sidebar.expander("Hypothèses et qualité de l'étude"):
         st.dataframe(pd.DataFrame(assumptions.items(), columns=["Paramètre", "Valeur"]), hide_index=True, width="stretch")
     with st.expander("Détail du gain tarifaire", expanded=False):

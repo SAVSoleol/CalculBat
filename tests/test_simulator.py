@@ -18,6 +18,7 @@ from loaders import (_parse_datetime, _numeric, _finalize, load_meter_file, load
                      prepare_simulation_data, UnsupportedFormatError)
 from simulation import simulate, grid_search, _tariff_vectors, _dispatch, simple_payback
 from recommend import recommend, best_per_capacity, MODE_SETTINGS, fixed_grid
+from grd_profiles import get_profile, special_tariff_schedule
 from i18n import study_assumptions
 from report import generate_battery_report, monthly_before_after
 
@@ -283,6 +284,121 @@ def test_tariff_boundary_and_schedule():
         _tariff_vectors(2, dates, tariff_schedule=schedule + schedule)
 
 
+def special_schedule(start, end, export=.03):
+    profile = get_profile("Spécial", 2026)
+    return special_tariff_schedule(start, end, tariff_export=export,
+        **{key: profile[key] for key in ("summer_ht", "summer_bt", "winter_ht", "winter_bt")})
+
+
+def test_special_four_prices_weekdays_and_calendar_years():
+    cases = [
+        ("2024-02-29 12:00", .1076, 1),
+        ("2024-12-31 23:45", .0814, 0),
+        ("2025-01-01 00:00", .0814, 0),
+        ("2025-01-01 07:00", .1076, 1),  # Le contrat ne définit pas d'exception fériée.
+        ("2025-03-31 22:45", .1076, 1),
+        ("2025-03-31 23:00", .0814, 0),
+        ("2025-04-01 00:00", .0601, 0),
+        ("2025-04-01 07:00", .0821, 1),
+        ("2025-04-05 06:45", .0601, 0),
+        ("2025-04-05 07:00", .0821, 1),  # Samedi HP.
+        ("2025-04-05 22:45", .0821, 1),
+        ("2025-04-05 23:00", .0601, 0),
+        ("2025-04-06 12:00", .0601, 0),  # Dimanche HC.
+        ("2025-09-30 22:45", .0821, 1),
+        ("2025-09-30 23:00", .0601, 0),
+        ("2025-10-01 00:00", .0814, 0),
+        ("2025-10-01 07:00", .1076, 1),
+        ("2025-10-04 12:00", .1076, 1),
+        ("2025-10-05 12:00", .0814, 0),
+        ("2025-12-31 23:45", .0814, 0),
+        ("2026-01-01 07:00", .1076, 1),
+        ("2026-04-01 07:00", .0821, 1),
+    ]
+    times = pd.DatetimeIndex([c[0] for c in cases]).tz_localize("Europe/Zurich")
+    schedule = special_schedule(times[0], times[-1] + pd.Timedelta(minutes=15))
+    buy, high, sell, ht_value = _tariff_vectors(len(times), times.tz_convert("UTC"),
+        tariff_schedule=schedule)
+    np.testing.assert_allclose(buy, [c[1] for c in cases])
+    np.testing.assert_allclose(high, [c[2] for c in cases])
+    np.testing.assert_allclose(ht_value, [c[1] * c[2] for c in cases])
+    np.testing.assert_allclose(sell, .03)
+
+
+@pytest.mark.parametrize("start,expected,high", [
+    ("2025-03-31 23:45", (.0814 + .0601) / 2, 0),
+    ("2025-09-30 23:45", (.0601 + .0814) / 2, 0),
+    ("2025-04-05 06:45", (.0601 + .0821) / 2, .5),
+    ("2025-04-05 22:45", (.0821 + .0601) / 2, .5),
+    ("2025-10-04 06:45", (.0814 + .1076) / 2, .5),
+    ("2025-10-04 22:45", (.1076 + .0814) / 2, .5),
+    ("2025-04-06 06:45", .0601, 0),
+    ("2025-10-05 22:45", .0814, 0),
+])
+def test_special_interval_crossing_a_boundary(start, expected, high):
+    times = pd.DatetimeIndex([start]).tz_localize("Europe/Zurich")
+    schedule = special_schedule(times[0], times[0] + pd.Timedelta(minutes=30))
+    buy, fractions, _, _ = _tariff_vectors(1, times, dt_hours=.5, tariff_schedule=schedule)
+    assert buy[0] == pytest.approx(expected)
+    assert fractions[0] == high
+
+
+def test_special_annual_bill_and_dst_reference():
+    # Référence indépendante : 1 kW constant, soit 0.25 kWh pour chaque quart d'heure physique.
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    swiss = ZoneInfo("Europe/Zurich")
+    instant = datetime(2025, 1, 1, tzinfo=swiss).astimezone(timezone.utc)
+    end = datetime(2026, 1, 1, tzinfo=swiss).astimezone(timezone.utc)
+    times, reference, hp = [], [], []
+    while instant < end:
+        local = instant.astimezone(swiss)
+        summer = 4 <= local.month <= 9
+        high = local.weekday() <= 5 and 7 <= local.hour < 23
+        reference.append((.0821 if high else .0601) if summer else (.1076 if high else .0814))
+        hp.append(high)
+        times.append(instant)
+        instant += timedelta(minutes=15)
+    times = pd.DatetimeIndex(times)
+    buy, high, _, _ = _tariff_vectors(len(times), times,
+        tariff_schedule=special_schedule(times[0], end))
+    np.testing.assert_allclose(buy, reference)
+    np.testing.assert_allclose(high, hp)
+    assert buy.sum() * .25 == pytest.approx(sum(reference) * .25)
+    local = times.tz_convert("Europe/Zurich")
+    for day, count in [("2025-03-30", 92), ("2025-10-26", 100)]:
+        selected = local.strftime("%Y-%m-%d") == day
+        assert selected.sum() == count
+        np.testing.assert_allclose(buy[selected], .0814)  # Dimanches d'hiver tarifaire.
+        assert not high[selected].any()
+
+
+@pytest.mark.parametrize("days", [[-1], [7], [1.5], [True], "0,1,2"])
+def test_calendar_rejects_invalid_hp_weekdays(days):
+    times = pd.date_range("2025-06-01", periods=1, tz="Europe/Zurich")
+    schedule = special_schedule(times[0], times[0] + pd.Timedelta(minutes=15))
+    schedule[0]["high_tariff_weekdays"] = days
+    with pytest.raises(ValueError, match="Jours HT"):
+        _tariff_vectors(1, times, tariff_schedule=schedule)
+
+
+@pytest.mark.parametrize("start,expected_hp", [("2025-03-31 06:45", .1076), ("2025-04-05 06:45", .0821)])
+def test_special_battery_gain_charges_export_and_avoids_correct_purchase(start, expected_hp):
+    times = pd.date_range(start, periods=2, freq="15min", tz="Europe/Zurich")
+    schedule = special_schedule(times[0], times[-1] + pd.Timedelta(minutes=15))
+    args = dict(dt_hours=.25, roundtrip_eff=1., tariff_import=.5, tariff_export=.03,
+        timestamps=times, soc_min_pct=0., tariff_schedule=schedule)
+    # Charge de 1 kWh en HC, restitution de 1 kWh en HP ; aucun crédit de stock initial.
+    sim = simulate([0., 1.], [1., 0.], 2., 4., **args)
+    assert sim.import_avoided == pytest.approx(1.)
+    assert sim.export_stored == pytest.approx(1.)
+    assert sim.gain_ht_chf == pytest.approx(expected_hp)
+    assert sim.gain_bt_chf == pytest.approx(0.)
+    assert sim.gain_chf == pytest.approx(expected_hp - .03)
+    grid = grid_search([0., 1.], [1., 0.], [2.], [4.], **args)
+    assert grid.iloc[0].Gain_CHF == pytest.approx(sim.gain_chf)
+
+
 @pytest.mark.parametrize("parameter,value", [("soc_min_pct", -1), ("soc_min_pct", 100),
     ("roundtrip_eff", 0), ("roundtrip_eff", 1.01), ("dt_hours", 0), ("power_kW", -1),
     ("capacity_kWh", np.nan), ("tariff_export", np.inf)])
@@ -381,6 +497,47 @@ def test_original_three_page_report_quality_and_soc():
 
 def summary_cards(at):
     return [m.value for m in at.markdown if 'class="mar-card-grid-5"' in m.value]
+
+
+def test_streamlit_special_sidebar_report_and_rate_cache(tmp_path):
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"), default_timeout=90).run()
+    raw, _ = synthetic_frame(n=384, start="2025-03-30")
+    csv = raw[["timestamp", "import_kWh", "export_kWh"]].rename(columns={
+        "timestamp": "Date", "import_kWh": "Import (kWh)", "export_kWh": "Export (kWh)"}).to_csv(index=False).encode()
+    at.file_uploader[0].set_value(("saisons.csv", csv, "text/csv")).run()
+    assert not at.exception and not at.error
+    original_cards = summary_cards(at)
+    original_tabs = [tab.label for tab in at.tabs]
+    at.selectbox(key="tariff_profile").set_value("Spécial").run()
+    assert not at.exception and not at.error
+    for field, value in [("summer_ht", 8.21), ("summer_bt", 6.01), ("winter_ht", 10.76), ("winter_bt", 8.14)]:
+        assert at.sidebar.number_input(key=f"{field}_Spécial_2026").value == value
+    assert not at.main.number_input and not at.main.selectbox and not at.main.radio
+    assert [tab.label for tab in at.tabs] == original_tabs
+    assert [e.label for e in at.main.expander] == ["Détail du gain tarifaire"]
+    assert summary_cards(at) and summary_cards(at) != original_cards
+    at.checkbox(key="pdf_financial_residential").set_value(True).run()
+    at.button(key="prepare_pdf").click().run()
+    assert not at.exception and not at.error
+    payload = at.session_state["report_bytes"]
+    (tmp_path / "special.pdf").write_bytes(payload)
+    pdf = PdfReader(BytesIO(payload))
+    assert len(pdf.pages) == 3
+    technical = pdf.pages[2].extract_text()
+    assert all(value in technical for value in ("Spécial", "0.0821", "0.0601", "0.1076", "0.0814"))
+    audit = json.loads(pdf.attachments["hypotheses_et_qualite.json"][0])
+    assert "dimanche entièrement HC" in audit["hypotheses"]["Week-end"]
+    assert {e["season"] for e in audit["calendrier_tarifaire"]} == {"été", "hiver"}
+    assert all(e["high_tariff_weekdays"] == [0, 1, 2, 3, 4, 5] for e in audit["calendrier_tarifaire"])
+    previous_cards = summary_cards(at)
+    at.number_input(key="summer_ht_Spécial_2026").set_value(18.21).run()
+    assert not at.exception and not at.error
+    assert "report_bytes" not in at.session_state
+    assert summary_cards(at) != previous_cards
+    at.selectbox(key="tariff_profile").set_value("Groupe E").run()
+    assert not at.exception and not at.error
+    assert summary_cards(at) == original_cards
 
 
 def test_streamlit_upload_soc_views_and_pdf():
