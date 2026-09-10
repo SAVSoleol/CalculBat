@@ -309,6 +309,14 @@ def _financial_box(
 
 
 
+def _resolve_header_image() -> str | None:
+    """Même bandeau que Peak Shaving, fourni à côté de report.py ou au lancement."""
+    for candidate in (ROOT / "rapport_header_montagnes.png", Path("rapport_header_montagnes.png")):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def _resolve_logo_path(logo_path: str | None = None) -> str | None:
     """Return the first existing Soleol logo path, if available."""
     from pathlib import Path
@@ -562,6 +570,12 @@ def _page_1(
     pdf.set_font("Arial", "B", 17)
     pdf.set_text_color(*SOLEOL_ORANGE)
     pdf.cell(140, 8, _tx("SYNTHESE ÉNERGÉTIQUE"), ln=True)
+
+    header_image = _resolve_header_image()
+    if header_image:
+        # Espace libre à droite du titre, au-dessus des cartes qui commencent à y=30.
+        # Le ratio de l'image est conservé ; aucun autre élément n'est déplacé.
+        pdf.image(header_image, x=149, y=8, w=55, h=19, keep_aspect_ratio=True)
 
     import_after = sim.import_after_total
     export_after = sim.export_after_total
