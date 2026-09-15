@@ -869,20 +869,6 @@ def main():
     st.sidebar.markdown("**Données**")
     unit = st.sidebar.selectbox("Unité des données import/export", ["Automatique", "kWh", "kW", "Wh", "W"], key="data_unit")
     st.sidebar.caption("kW/W = puissance moyenne convertie en kWh avec le pas de temps détecté. kWh/Wh = énergie déjà mesurée par intervalle.")
-    position = st.sidebar.selectbox("L'heure du fichier représente", ["Fin d'intervalle", "Début d'intervalle"],
-        key="timestamp_position", help="À vérifier auprès de l'exporteur. Exemple : 00h15 en fin d'intervalle décrit 00h00-00h15. Les index cumulés sont toujours affectés à la fin.")
-    with st.sidebar.expander("Horodatages et pas de mesure"):
-        ambiguous_label = st.selectbox("Heure d'automne isolée",
-            ["Automatique (heure suisse)", "Première occurrence (été)", "Seconde occurrence (hiver)", "Signaler l'ambiguïté"],
-            key="autumn_hour_policy",
-            help="Automatique : conserver les deux occurrences si elles sont fournies. Si une seule est présente sans offset, retenir la première (été) et signaler cette hypothèse à l'écran et dans le PDF.")
-        minute_label = st.selectbox("Pas de mesure (minutes)", ["Automatique", "5", "10", "15", "30", "60"], key="interval_minutes")
-        blank_label = st.selectbox("Cellules vides des exports Groupe E",
-            ["Automatique (convention de l'export)", "Toujours inconnues"], key="groupe_e_blank_policy",
-            help="Pour le modèle Excel Groupe E reconnu, une cellule vide est interprétée comme zéro si l'autre flux est mesuré. Les mentions Erroné/Manquant et les deux flux vides restent inconnus. Cette convention est signalée dans le rapport.")
-        aggregate_devices = st.checkbox("Huawei : additionner des compteurs distincts du même site", value=False, key="aggregate_devices",
-            help="À activer uniquement si les appareils mesurent des flux distincts à additionner. Ne pas additionner plusieurs appareils qui relisent le même compteur.")
-        st.caption("Les changements d'heure sont traités automatiquement. Les offsets fournis sont conservés ; les deux occurrences d'automne correctement renseignées restent distinctes.")
     try:
         tariffs = _tariff_settings()
     except ValueError as error:
@@ -938,14 +924,10 @@ def main():
     else:
         active = [uploaded[chosen]]
     files = tuple((f.name, f.getvalue()) for f in active)
-    ambiguous = {"Automatique (heure suisse)": "auto", "Signaler l'ambiguïté": "raise",
-                 "Première occurrence (été)": "daylight", "Seconde occurrence (hiver)": "standard"}[ambiguous_label]
     try:
         with st.spinner("Lecture et contrôle de la chronologie..."):
             raw, raw_meta = _load_cached(files, "auto" if unit == "Automatique" else unit,
-                "end" if position == "Fin d'intervalle" else "start", ambiguous,
-                None if minute_label == "Automatique" else float(minute_label), same_meter, aggregate_devices,
-                "unknown" if blank_label == "Toujours inconnues" else "auto")
+                "end", "auto", None, same_meter, False, "auto")
     except (ValueError, OSError, KeyError) as error:
         st.error(str(error))
         return
