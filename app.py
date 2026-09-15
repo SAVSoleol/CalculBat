@@ -632,7 +632,17 @@ def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_ma
         st.caption("Affichage uniquement ; la configuration étudiée reste identique.")
         st.download_button("Configurations simulées (CSV)", results.to_csv(index=False).encode("utf-8-sig"), "configurations_batterie.csv", "text/csv")
     f = rec.frontier.copy()
-    f["Marginal_CHF_per_kWh"] = f.Gain_CHF.diff() / f.Cap_kWh.diff()
+    # The sizing frontier may select a different power at each capacity.  It is
+    # suitable for the recommendation, but not for the marginal-capacity chart:
+    # a power change would otherwise be attributed to the added kWh.
+    marginal_power_kw = float(rec.best.Power_kW)
+    fixed_power = results[np.isclose(results["Power_kW"].to_numpy(float), marginal_power_kw)].copy()
+    fixed_power = fixed_power.sort_values("Cap_kWh").drop_duplicates("Cap_kWh", keep="last")
+    f = f.merge(
+        fixed_power[["Cap_kWh", "Gain_CHF"]].rename(columns={"Gain_CHF": "Gain_fixed_power_CHF"}),
+        on="Cap_kWh", how="left",
+    )
+    f["Marginal_CHF_per_kWh"] = f.Gain_fixed_power_CHF.diff() / f.Cap_kWh.diff()
     display_frontier = f[f.Cap_kWh.between(*bounds)].iloc[::stride]
     tab_front, tab_soc, tab_cyc, tab_ba = st.tabs(
         ["📈 Gain vs capacité", "🔋 État de charge", "♻️ Cycles cumulés", "📊 Avant / Après"])
@@ -695,8 +705,9 @@ def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_ma
         fig_marg.add_trace(go.Bar(
             x=f.Cap_kWh,
             y=f.Marginal_CHF_per_kWh.fillna(0.0),
-            name="Gain du kWh ajouté",
-            hovertemplate="Capacité %{x:.0f} kWh : +%{y:.1f} CHF sur la période par kWh ajouté<extra></extra>",
+            name=f"Gain du kWh ajouté ({marginal_power_kw:g} kW fixes)",
+            hovertemplate=(f"Puissance fixe {marginal_power_kw:g} kW<br>"
+                           "Capacité %{x:.0f} kWh : +%{y:.1f} CHF sur la période par kWh ajouté<extra></extra>"),
         ))
         fig_marg.add_hline(
             y=marginal_floor,
