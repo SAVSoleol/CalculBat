@@ -206,8 +206,7 @@ def _tariff_settings():
     st.sidebar.markdown("**Tarifs énergie**")
     name = st.sidebar.selectbox("Profil tarifaire GRD", list(GRD_PROFILES),
         index=list(GRD_PROFILES).index("Groupe E"), key="tariff_profile")
-    year = int(st.sidebar.number_input("Année du scénario tarifaire", min_value=2000, max_value=2100,
-                                       value=2026, step=1, key="tariff_year"))
+    year = 2026
     profile = get_profile(name, year)
     token = f"{name}_{year}"
     if profile.get("revision"):
@@ -259,49 +258,10 @@ def _calendar(meta, tariffs):
                 "hiver du 1er octobre au 31 mars, appliqués automatiquement aux dates réelles de la courbe, en heure suisse. "
                 "HP du lundi au vendredi de 07h00 à 23h00 et le samedi de 07h00 à 13h30 ; HC le reste du temps. "
                 "Ce scénario ne reconstitue pas les factures historiques.")
-        st.caption(note)
-        st.caption("Les tarifs HT/BT du détail des gains et du rapport sont des moyennes pondérées par l'énergie réellement évitée dans chaque saison (HT = HP, BT = HC).")
-        price_periods = []
-        for entry in schedule:
-            if (price_periods and price_periods[-1]["end"] == entry["start"]
-                    and all(price_periods[-1][key] == entry[key]
-                            for key in ("season", "ht", "bt", "export"))):
-                price_periods[-1]["end"] = entry["end"]
-            else:
-                price_periods.append(dict(entry))
-        st.dataframe(pd.DataFrame([{
-            "Début": entry["start"], "Fin exclue": entry["end"], "Saison": entry["season"],
-            "HP (ct/kWh)": round(entry["ht"] * 100, 2), "HC (ct/kWh)": round(entry["bt"] * 100, 2),
-            "Reprise (CHF/kWh)": entry["export"],
-        } for entry in price_periods]), hide_index=True, width="stretch")
         return schedule, note
-    mode = st.selectbox("Application des tarifs", ["Scénario tarifaire unique", "Calendrier par période"], key="tariff_application")
-    if mode == "Scénario tarifaire unique":
-        note = (f"Tarifs du scénario {tariffs['year']} appliqués à tous les intervalles mesurés, "
-                "aux jours et heures de la courbe source. Ce n'est pas une reconstitution des factures historiques.")
-        st.caption(note)
-        return None, note
-    st.caption("Chaque période est définie par un début inclus et une fin exclue. Renseigner les prix et horaires du contrat ; aucun trou ni chevauchement n'est accepté.")
-    first = pd.Timestamp(meta.start).year
-    last = (pd.Timestamp(meta.end) - pd.Timedelta(seconds=1)).year
-    defaults = []
-    for year in range(first, last + 1):
-        profile = get_profile(tariffs["name"], year)
-        defaults.append({"Début": f"{year}-01-01", "Fin exclue": f"{year+1}-01-01",
-                         "HT": tariffs["ht"], "BT": tariffs["bt"], "Reprise": tariffs["export"],
-                         "Plages HT": ";".join(f"{a:g}-{b:g}" for a, b in profile["periods"]),
-                         "Week-end BT": profile["weekend_low"]})
-    table = st.data_editor(pd.DataFrame(defaults), num_rows="dynamic", hide_index=True,
-        key=f"calendar_{meta.fingerprint}_{tariffs['name']}", width="stretch")
-    table["Plages HT"] = table["Plages HT"].fillna("")
-    if table.empty or table.isna().any().any():
-        raise ValueError("Renseigner toutes les cellules du calendrier tarifaire.")
-    schedule = []
-    for _, row in table.iterrows():
-        schedule.append(dict(start=str(row["Début"]), end=str(row["Fin exclue"]), ht=float(row.HT),
-            bt=float(row.BT), export=float(row.Reprise), periods=parse_periods(row["Plages HT"]),
-            weekend_low=bool(row["Week-end BT"])))
-    return schedule, "Calendrier explicite de prix et horaires, appliqué aux dates réelles des mesures."
+    note = (f"Tarifs 2026 appliqués à tous les intervalles mesurés, aux jours et heures de la courbe source. "
+            "Ce scénario ne reconstitue pas les factures historiques.")
+    return None, note
 
 
 
@@ -674,8 +634,8 @@ def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_ma
     f = rec.frontier.copy()
     f["Marginal_CHF_per_kWh"] = f.Gain_CHF.diff() / f.Cap_kWh.diff()
     display_frontier = f[f.Cap_kWh.between(*bounds)].iloc[::stride]
-    tab_front, tab_pay, tab_soc, tab_cyc, tab_ba = st.tabs(
-        ["📈 Gain vs capacité", "Rentabilité", "🔋 État de charge", "♻️ Cycles cumulés", "📊 Avant / Après"])
+    tab_front, tab_soc, tab_cyc, tab_ba = st.tabs(
+        ["📈 Gain vs capacité", "🔋 État de charge", "♻️ Cycles cumulés", "📊 Avant / Après"])
     with tab_front:
         f = display_frontier.copy()
 
@@ -772,43 +732,6 @@ def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_ma
             hide_index=True,
         )
 
-    with tab_pay:
-        f = rec.frontier.copy()
-        fixed = float(st.session_state.get("cost_fixed", 0.))
-        module = float(st.session_state.get("cost_module", 0.))
-        life = float(st.session_state.get("cost_life", 13.))
-        has_cost_model = fixed > 0 or module > 0
-        f["capex"] = fixed + module * f.Cap_kWh if has_cost_model else np.nan
-        f["payback_yr"] = f.capex / f.Gain_annual_CHF.where(f.Gain_annual_CHF > 0)
-        rec_pb = (fixed + module * sim.capacity_kWh) / sim.gain_annual_chf if has_cost_model and annual and sim.gain_annual_chf > 0 else simple_payback(capex, sim.gain_annual_chf)
-        st.success(f"Configuration étudiée : {sim.capacity_kWh:g} kWh. Les coûts renseignés servent à comparer les retours simples.")
-        m = st.columns(3)
-        m[0].metric("Capacité recommandée" if rec.recommended else "Capacité étudiée", f"{sim.capacity_kWh:g} kWh")
-        m[1].metric("Économies annuelles" if annual else "Économies sur la période", f"{_fmt(sim.gain_annual_chf if annual else sim.gain_chf)} CHF" + ("/an" if annual else ""))
-        m[2].metric("Retour simple", f"{rec_pb:.1f} ans" if rec_pb is not None else "n/a")
-        if f.payback_yr.notna().any():
-            st.plotly_chart(_fig_payback(f, T, life, sim.capacity_kWh, cycles_low), width="stretch")
-            st.caption("Comparaison avec le coût fixe et le prix par kWh renseignés, à profil et tarifs constants.")
-        else:
-            fig = go.Figure(go.Scatter(x=f.Cap_kWh, y=f.payback_yr, mode="lines+markers", line=dict(color="#7c3aed", width=3)))
-            fig.add_annotation(text="Renseigner les coûts à gauche et disposer de gains annuels positifs", x=.5, y=.5, xref="paper", yref="paper", showarrow=False)
-            fig.update_layout(title=T("pay_pb_title"), xaxis=dict(title=T("axis_capacity"), dtick=2), yaxis_title=T("pay_pb_axis"), template="plotly_white", height=380, margin=dict(t=60,r=50,l=60,b=50))
-            st.plotly_chart(fig, width="stretch")
-            st.caption("Aucun coût de batterie n'est présupposé. Un devis total ne suffit pas à comparer plusieurs capacités.")
-        days = sim.valid.sum() * sim.dt_hours / 24
-        f["frac_full_per_day"] = f.Cycles_period / days
-        if annual:
-            fig = _fig_cycles(f, T, cycles_low, cycles_high, sim.capacity_kWh)
-        else:
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_trace(go.Scatter(x=f.Cap_kWh, y=f.Cycles_period, name="Cycles DC sur la période", mode="lines+markers", line=dict(color="#0891b2", width=3)), secondary_y=False)
-            fig.add_trace(go.Scatter(x=f.Cap_kWh, y=f.frac_full_per_day, name="Cycles DC par jour simulé", mode="lines+markers", line=dict(color="#65a30d", width=2, dash="dot")), secondary_y=True)
-            fig.add_vline(x=sim.capacity_kWh, line_color="#16a34a")
-            fig.update_layout(xaxis=dict(title=T("axis_capacity"),dtick=2), template="plotly_white", height=380, legend=dict(orientation="h",y=1.13), margin=dict(t=60,r=70,l=60,b=50))
-            fig.update_yaxes(title_text=cycles_axis, secondary_y=False, color="#0891b2")
-            fig.update_yaxes(title_text="Cycles DC par jour simulé", secondary_y=True, color="#65a30d")
-        st.plotly_chart(fig, width="stretch")
-        st.caption("Cycles calculés à partir de la décharge interne DC et de la capacité utile. Le seuil annuel s'applique uniquement aux périodes annualisées.")
     df = frame
     ts = frame.timestamp.dt.tz_convert("Europe/Zurich")
     with tab_soc:
@@ -933,52 +856,16 @@ def main():
         return
     st.caption(f"Jeu de données actif : **{raw_meta.source}**")
     st.caption(f"Unité appliquée aux données : **{raw_meta.data_unit}**")
-    with st.sidebar.expander("📋 Qualité des données détectées", expanded=False):
-        q1, q2, q3, q4 = st.columns(4)
-        q1.metric("Période couverte", f"{raw_meta.coverage_days:.2f} jours")
-        q2.metric("Intervalles exploitables", f"{raw_meta.completeness:.2%}")
-        q3.metric("Intervalles invalides", raw_meta.invalid_rows)
-        q4.metric("Intervalles absents", raw_meta.absent_rows)
-        st.caption(f"Source : {raw_meta.source} | Unité source : {raw_meta.data_unit} | Pas : {raw_meta.dt_hours * 60:g} min | Données internes en kWh.")
-        if raw_meta.missing_periods:
-            with st.expander("Périodes manquantes (heures suisses)", expanded=False):
-                st.dataframe(pd.DataFrame(raw_meta.missing_periods), hide_index=True, width="stretch")
-        missing_policy = "block"
-        if raw_meta.completeness < 1:
-            with st.expander("Traitement avancé des données manquantes"):
-                treatment = st.radio("Traitement des données manquantes",
-                    ["Calculer les segments mesurés", "Estimer par jours comparables", "Attendre des données complètes"],
-                    key="gap_treatment")
-                st.caption("Par défaut, le calcul se poursuit sur les segments mesurés. Les trous restent inconnus et chaque reprise commence au SOC minimum.")
-            missing_policy = {"Attendre des données complètes": "block", "Calculer les segments mesurés": "segments", "Estimer par jours comparables": "estimate"}[treatment]
-        try:
-            frame, meta = prepare_simulation_data(raw, raw_meta, missing_policy)
-        except ValueError as error:
-            st.warning(str(error))
-            return
-        for warning in meta.warnings:
-            st.warning(warning)
-        annualize = st.checkbox("Calculer aussi un équivalent annuel sur 365 jours", value=meta.complete_year,
-            disabled=not meta.annualization_allowed, key=f"annualize_{meta.fingerprint}_{missing_policy}")
-        if not meta.annualization_allowed:
-            annualize = False
-            st.caption("Annualisation indisponible : il faut au moins 330 jours, les 12 mois représentés, 98 % de mesures et au moins 90 % par mois présent.")
-        elif annualize and not meta.complete_year:
-            st.warning("L'équivalent annuel est une extrapolation d'une période incomplète. Il ne reconstitue pas les mesures manquantes ni les effets saisonniers absents.")
-    with st.sidebar.expander("Tarifs appliqués à cette courbe", expanded=False):
-        try:
-            schedule, tariff_note = _calendar(meta, tariffs)
-        except ValueError as error:
-            st.error(str(error))
-            return
-    with st.sidebar.expander("Coût installé et retour simple (facultatif)"):
-        capex_input = st.number_input("Coût total installé de la configuration étudiée (CHF)", min_value=0., value=0., step=100., key="capex",
-            help="Zéro signifie non renseigné. Ce coût ne modifie pas le dimensionnement énergétique.")
-        st.caption("Aucun prix batterie n'est présupposé. Le retour simple suppose des tarifs et un profil constants.")
-        st.number_input("Coût fixe pour comparer les capacités (CHF)", min_value=0., value=0., step=100., key="cost_fixed")
-        st.number_input("Prix installé par kWh pour la comparaison (CHF/kWh)", min_value=0., value=0., step=50., key="cost_module")
-        st.number_input("Horizon de comparaison (ans)", min_value=1., value=13., step=1., key="cost_life")
-    capex = float(capex_input) if capex_input > 0 else None
+    st.sidebar.metric("Nombre de périodes manquantes", len(raw_meta.missing_periods))
+    missing_policy = "estimate" if raw_meta.completeness < 1 else "block"
+    try:
+        frame, meta = prepare_simulation_data(raw, raw_meta, missing_policy)
+    except ValueError as error:
+        st.warning(str(error))
+        return
+    annualize = meta.complete_year
+    schedule, tariff_note = _calendar(meta, tariffs)
+    capex = None
     options = dict(dt_hours=meta.dt_hours, roundtrip_eff=eff, tariff_import=tariffs["ht"],
         tariff_export=tariffs["export"], coverage_days=meta.coverage_days, soc_min_pct=float(soc_min),
         timestamps=frame.timestamp, tariff_import_ht=tariffs["ht"], tariff_import_bt=tariffs["bt"],
@@ -1003,16 +890,11 @@ def main():
         st.warning("Configuration d'analyse : les critères ne permettent pas de valider un dimensionnement.")
     for warning in recommendation_messages(rec):
         st.warning(warning)
-    with st.sidebar.expander("Détail du dimensionnement et des hypothèses"):
-        for code, params in rec.notes:
-            st.caption(msg("fr", code, params))
     assumptions = study_assumptions(sim, meta, rec, tariff_profile=tariffs["name"], tariff_year=tariffs["year"],
         tariff_note=tariff_note + (" Référence : " + tariffs["note"] if tariffs["note"] else " Contrat non référencé."),
         tariff_import_ht=tariffs["ht"], tariff_import_bt=tariffs["bt"], tariff_export=tariffs["export"],
         periods=tariffs["periods"], weekend_low=tariffs["weekend"], tariff_schedule=schedule, capex_chf=capex,
         seasonal_prices=tariffs.get("seasonal_prices"))
-    with st.sidebar.expander("Hypothèses et qualité de l'étude"):
-        st.dataframe(pd.DataFrame(assumptions.items(), columns=["Paramètre", "Valeur"]), hide_index=True, width="stretch")
     with st.expander("Détail du gain tarifaire", expanded=False):
         st.dataframe(pd.DataFrame({
             "Poste": ["Import évité haut tarif", "Import évité bas tarif", "Valeur de revente perdue", "Gain net batterie"],
@@ -1025,25 +907,15 @@ def main():
     render_energy_dashboard(frame, sim, rec.best)
     _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_max, cycles_floor)
     st.divider()
-    # Button controls report computation. Any changed study invalidates the prepared download.
-    identity = sha256(repr((meta.fingerprint, assumptions, rec.best.to_dict(), meta.warnings,
-                           tuple(caps), tuple(powers), defaults["c_rate"], rec.warnings, rec.notes,
-                           sections, show_financial, client, schedule)).encode()).hexdigest()
-    if st.session_state.get("report_identity") != identity:
-        st.session_state.pop("report_bytes", None)
-    if st.sidebar.button("Préparer le rapport PDF", key="prepare_pdf"):
-        with st.spinner("Création du rapport..."):
-            try:
-                st.session_state["report_bytes"] = generate_battery_report(df=frame, meta=meta, rec=rec, sim=sim,
-                    assumptions=assumptions, client_name=client, sections=sections, show_financial=show_financial,
-                    capex_chf=capex, tariff_schedule=schedule)
-                st.session_state["report_identity"] = identity
-            except (ValueError, OSError) as error:
-                st.error(f"Le PDF n'a pas pu être créé : {error}")
-    st.download_button(_original_label("pdf_button"), st.session_state.get("report_bytes", b""),
-                       _original_label("pdf_filename"), "application/pdf", key="download_pdf",
-                       disabled=st.session_state.get("report_bytes") is None)
-    st.sidebar.caption("Préparer le PDF pour activer son téléchargement en bas de page.")
+    try:
+        report_bytes = generate_battery_report(df=frame, meta=meta, rec=rec, sim=sim,
+            assumptions=assumptions, client_name=client, sections=sections, show_financial=show_financial,
+            capex_chf=capex, tariff_schedule=schedule)
+    except (ValueError, OSError) as error:
+        st.error(f"Le PDF n'a pas pu être créé : {error}")
+        return
+    st.download_button(_original_label("pdf_button"), report_bytes,
+                       _original_label("pdf_filename"), "application/pdf", key="download_pdf")
 
 
 if __name__ == "__main__":
