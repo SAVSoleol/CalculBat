@@ -617,7 +617,7 @@ def _fig_cycles(F, T, cycles_low, cycles_high, rec_cap):
                       margin=dict(t=60, r=70, l=60, b=50))
     return fig
 
-def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_max, cycles_low):
+def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_max, cycles_low, marginal_pct):
     T = _original_label
     annual = sim.annual_factor is not None
     best, big = rec.best, rec.max_gain_pick
@@ -713,7 +713,7 @@ def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_ma
             y=marginal_floor,
             line_dash="dash",
             line_color="#dc2626",
-            annotation_text="Seuil relatif : 30% de la référence lissée",
+            annotation_text=f"Seuil relatif : {marginal_pct}% de la référence lissée",
             annotation_position="top right",
         )
         fig_marg.add_vline(
@@ -731,7 +731,7 @@ def _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_ma
         )
         st.plotly_chart(fig_marg, width="stretch")
         st.caption(
-            f"Le repérage utilise une fenêtre fixe de {MODE_SETTINGS[mode]['window']:g} kWh et un seuil de 30% de la référence marginale lissée. Les cycles DC restent un contrôle technique."
+            f"Le repérage utilise une fenêtre fixe de {MODE_SETTINGS[mode]['window']:g} kWh et un seuil de {marginal_pct}% de la référence marginale lissée. Les cycles DC restent un contrôle technique."
         )
 
         st.dataframe(
@@ -827,6 +827,7 @@ def main():
     st.sidebar.caption(f"Pas de calcul : {cs:g} kWh et {ps:g} kW. Ces bornes limitent la recherche ; les réglages sous le graphique limitent seulement l'affichage.")
     if defaults["c_rate"] is not None:
         st.sidebar.caption(f"Contrainte {defaults['c_rate']:g}C : puissance ≤ capacité nominale × {defaults['c_rate']:g}.")
+    marginal_pct = st.sidebar.slider("Seuil de gain marginal (%)", min_value=1, max_value=100, value=30, step=1, key="marginal_pct", help="Pourcentage de la meilleure valeur marginale lissée. Un seuil élevé favorise un arrêt plus précoce.")
     with st.sidebar.expander("Critères et ordre des flux"):
         cycles_floor = st.number_input("Seuil interne de cycles DC/an", min_value=0., value=defaults["cycles"], step=10., key=f"cycles_{mode}")
         minimum_saving = st.number_input("Économie annuelle minimale pertinente (CHF/an)", min_value=0., value=10., step=10., key="minimum_saving")
@@ -891,7 +892,7 @@ def main():
         with st.spinner("Simulation des configurations et dimensionnement..."):
             results = _grid_cached(imp, exp, tuple(caps), tuple(powers), options, defaults["c_rate"])
             rec = recommend(results, study_mode=mode, min_cycles_per_year=cycles_floor,
-                            minimum_annual_saving_chf=minimum_saving)
+                            minimum_annual_saving_chf=minimum_saving, marginal_relative_floor=marginal_pct / 100.0)
             sim = _simulate_cached(imp, exp, float(rec.best.Cap_kWh), float(rec.best.Power_kW), options)
     except ValueError as error:
         st.error(str(error))
@@ -916,7 +917,7 @@ def main():
         st.caption(f"Formule : achats HT évités + achats BT évités - revente non perçue. Profil utilisé : {tariffs['name']}.")
     st.divider()
     render_energy_dashboard(frame, sim, rec.best)
-    _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_max, cycles_floor)
+    _render_original_tabs(frame, sim, rec, results, capex, mode, cap_min, cap_max, cycles_floor, marginal_pct)
     st.divider()
     try:
         report_bytes = generate_battery_report(df=frame, meta=meta, rec=rec, sim=sim,
